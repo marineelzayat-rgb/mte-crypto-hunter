@@ -81,19 +81,27 @@ the recorded snapshots.
 
 ## Railway 24/7 service
 
-The included `Dockerfile` starts `python -m mte_crypto.daemon`. Every hour it:
+The included `Dockerfile` starts `python -m mte_crypto.daemon`. It runs two
+causal discovery layers:
 
-1. scans the top 120 liquid Binance Spot USDT altcoins;
-2. applies the exact causal `PRE_IGNITION_HUNT` gate and frozen RF ranker;
-3. keeps each new `HUNTER_ALERT` active for 48 hours;
-4. records top-20 order-book and executed taker-flow snapshots once per second
-   for active candidates only;
-5. writes scans and compressed JSONL research data under `/data`.
+1. every hour, scans the top 120 liquid Binance Spot USDT altcoins and applies
+   the exact causal `PRE_IGNITION_HUNT` gate plus frozen RF ranker;
+2. every five minutes, takes a lightweight price/volume pulse of every eligible
+   Spot/USDT market, including cold markets below the top-120 liquidity cutoff;
+3. labels a pulse `EARLY_PULSE` while its 24h return is at most 20%, or
+   `RAPID_MOVE_NO_CHASE` once it is already extended;
+4. keeps each `HUNTER_ALERT` active for 48 hours and each pulse candidate active
+   for two hours;
+5. records top-20 order-book and executed taker-flow snapshots once per second
+   for both hunter and pulse candidates;
+6. writes scans, pulse history, and compressed JSONL research data under `/data`.
 
 Recommended Railway volume mount: `/data`. Optional environment variables:
 
 - `MTE_SCAN_TOP` (default `120`)
 - `MTE_SCAN_INTERVAL_SECONDS` (default `3600`)
+- `MTE_PULSE_INTERVAL_SECONDS` (default `300`)
+- `MTE_PULSE_TTL_MINUTES` (default `120`)
 - `MTE_CANDIDATE_TTL_HOURS` (default `48`)
 - `MTE_BOOK_SAMPLE_SECONDS` (default `1`)
 - `MTE_MAX_BOOK_SYMBOLS` (default `10`)
