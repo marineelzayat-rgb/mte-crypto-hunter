@@ -1,0 +1,8 @@
+data
+output
+tests
+__pycache__
+*.pyc
+*.zip
+models/mte_hunter_rf_v0_2.joblib
+models/mte_pre_hunter_rf_v0_3.joblib

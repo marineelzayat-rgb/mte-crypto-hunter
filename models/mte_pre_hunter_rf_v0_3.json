@@ -1,0 +1,62 @@
+{
+  "version": "MTE_PRE_HUNTER_RF_V0_3",
+  "purpose": "candidate discovery only; not an entry or order model",
+  "features": [
+    "return_24h_calc",
+    "quote_volume_24h_roll",
+    "rvol_1h",
+    "volume_24h_ratio",
+    "relative_strength_24h",
+    "btc_return_24h",
+    "btc_return_7d",
+    "compression_rank",
+    "structural_risk_pct",
+    "break_distance_atr",
+    "distance_to_macro_high_atr",
+    "tr_atr",
+    "body_ratio",
+    "bull_clv",
+    "prior_spike_count_7d",
+    "last_spike_retention",
+    "range_position_7d",
+    "taker_buy_ratio_24h",
+    "green_volume_share_24h",
+    "breadth_positive_24h",
+    "breadth_positive_7d",
+    "breadth_breakout_7d",
+    "breadth_volume_expansion",
+    "median_alt_return_24h",
+    "median_alt_return_7d",
+    "p90_alt_return_24h",
+    "p95_alt_return_24h",
+    "share_alt_return_24h_gt_10pct",
+    "tail_heat_72h"
+  ],
+  "threshold": 0.6753,
+  "training_rows": 14226,
+  "training_base_rate": 0.03219457331646281,
+  "evaluations": [
+    {
+      "dataset": "output/pre_dataset_2023.csv",
+      "rows": 6326,
+      "base_rate": 0.03303825482137211,
+      "average_precision": 0.30776833250636326,
+      "roc_auc": 0.9035866003677882,
+      "threshold": 0.6753,
+      "selected": 181,
+      "selected_precision": 0.35359116022099446,
+      "selected_true": 64
+    },
+    {
+      "dataset": "output/pre_dataset_2024.csv",
+      "rows": 7900,
+      "base_rate": 0.03151898734177215,
+      "average_precision": 0.2447988651555803,
+      "roc_auc": 0.8862122125936763,
+      "threshold": 0.6753,
+      "selected": 217,
+      "selected_precision": 0.2672811059907834,
+      "selected_true": 58
+    }
+  ]
+}
