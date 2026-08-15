@@ -106,6 +106,21 @@ def main() -> None:
         f"ttl={ttl_hours}h, data={data_dir}",
         flush=True,
     )
+    if os.environ.get("MTE_TELEGRAM_BOT_TOKEN") and os.environ.get(
+        "MTE_TELEGRAM_CHAT_ID"
+    ):
+        try:
+            if send_telegram(
+                "MTE Crypto Hunter is online. Scanning the top "
+                f"{top} Binance Spot USDT altcoins every "
+                f"{interval_seconds // 60} minutes."
+            ):
+                print("Telegram startup message sent", flush=True)
+        except Exception as exc:
+            print(
+                f"Telegram startup message failed: {type(exc).__name__}: {exc}",
+                flush=True,
+            )
     while True:
         cycle_started = time.monotonic()
         try:
