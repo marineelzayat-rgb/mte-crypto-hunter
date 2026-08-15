@@ -82,7 +82,7 @@ def liquid_usdt_universe(
     }
     tickers = {item["symbol"]: item for item in client.tickers_24h()}
     excluded_suffixes = ("UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT")
-    excluded_bases = {"USDC", "FDUSD", "TUSD", "DAI", "USDP", "EUR", "AEUR"}
+    excluded_bases = {"BTC", "USDC", "FDUSD", "TUSD", "DAI", "USDP", "EUR", "AEUR"}
 
     requested = {s.upper() for s in explicit_symbols or []}
     rows: list[dict] = []
