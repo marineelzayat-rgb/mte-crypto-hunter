@@ -8,9 +8,18 @@ import os
 from pathlib import Path
 import time
 
+from .binance import BinancePublicClient, spot_usdt_tickers
 from .book_collector import collect
 from .config import DEFAULT_CONFIG
 from .monitor import format_alert, send_telegram
+from .pulse import (
+    DEFAULT_PULSE_CONFIG,
+    PulseConfig,
+    append_history,
+    evaluate_pulses,
+    format_pulse_alert,
+    update_pulse_candidates,
+)
 from .scan import scan_market
 
 
@@ -29,7 +38,7 @@ def _read_json(path: Path) -> dict:
         return {}
 
 
-def _write_json(path: Path, value: dict) -> None:
+def _write_json(path: Path, value: dict | list) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, indent=2, sort_keys=True))
@@ -93,6 +102,53 @@ def run_scan(data_dir: Path, top: int, ttl_hours: int) -> list[str]:
     return sorted(active)
 
 
+def run_pulse(
+    data_dir: Path,
+    cfg: PulseConfig,
+    *,
+    muted_alert_symbols: set[str] | None = None,
+) -> list[str]:
+    now = _utc_now()
+    client = BinancePublicClient(DEFAULT_CONFIG.api_base)
+    markets = spot_usdt_tickers(client)
+    history_path = data_dir / "pulse_history.json"
+    active_path = data_dir / "pulse_candidates.json"
+    history = _read_json(history_path)
+    rows = evaluate_pulses(markets, history, now=now, cfg=cfg)
+    next_history = append_history(
+        markets,
+        history,
+        now=now,
+        history_minutes=cfg.history_minutes,
+    )
+    active, new_alerts = update_pulse_candidates(
+        rows,
+        _read_json(active_path),
+        now=now,
+        ttl_minutes=cfg.ttl_minutes,
+    )
+
+    _write_json(history_path, next_history)
+    _write_json(active_path, active)
+    _write_json(
+        data_dir / "latest_pulse.json",
+        {"observed_at": now.isoformat(), "candidates": rows},
+    )
+    muted = muted_alert_symbols or set()
+    for row in new_alerts:
+        if row["symbol"] in muted:
+            continue
+        message = format_pulse_alert(row)
+        if not send_telegram(message):
+            print(message, flush=True)
+
+    priority = {"EARLY_PULSE": 0, "RAPID_MOVE_NO_CHASE": 1}
+    return sorted(
+        active,
+        key=lambda symbol: (priority.get(active[symbol].get("state", ""), 9), symbol),
+    )
+
+
 def main() -> None:
     data_dir = Path(os.getenv("MTE_DATA_DIR", "output/live"))
     top = int(os.getenv("MTE_SCAN_TOP", "120"))
@@ -100,10 +156,17 @@ def main() -> None:
     ttl_hours = max(1, int(os.getenv("MTE_CANDIDATE_TTL_HOURS", "48")))
     max_book_symbols = max(1, int(os.getenv("MTE_MAX_BOOK_SYMBOLS", "10")))
     sample_seconds = max(0.25, float(os.getenv("MTE_BOOK_SAMPLE_SECONDS", "1")))
+    pulse_interval_seconds = max(
+        60, int(os.getenv("MTE_PULSE_INTERVAL_SECONDS", "300"))
+    )
+    pulse_cfg = replace(
+        DEFAULT_PULSE_CONFIG,
+        ttl_minutes=max(15, int(os.getenv("MTE_PULSE_TTL_MINUTES", "120"))),
+    )
 
     print(
         f"MTE daemon started: top={top}, scan_every={interval_seconds}s, "
-        f"ttl={ttl_hours}h, data={data_dir}",
+        f"pulse_every={pulse_interval_seconds}s, ttl={ttl_hours}h, data={data_dir}",
         flush=True,
     )
     if os.environ.get("MTE_TELEGRAM_BOT_TOKEN") and os.environ.get(
@@ -113,7 +176,8 @@ def main() -> None:
             if send_telegram(
                 "MTE Crypto Hunter is online. Scanning the top "
                 f"{top} Binance Spot USDT altcoins every "
-                f"{interval_seconds // 60} minutes."
+                f"{interval_seconds // 60} minutes, with an all-market "
+                f"price/volume pulse every {pulse_interval_seconds // 60} minutes."
             ):
                 print("Telegram startup message sent", flush=True)
         except Exception as exc:
@@ -121,16 +185,39 @@ def main() -> None:
                 f"Telegram startup message failed: {type(exc).__name__}: {exc}",
                 flush=True,
             )
+    next_full_scan = 0.0
+    hunter_symbols: list[str] = []
     while True:
         cycle_started = time.monotonic()
-        try:
-            symbols = run_scan(data_dir, top, ttl_hours)[:max_book_symbols]
-            print(f"Scan complete; active order-book candidates: {symbols or 'none'}", flush=True)
-        except Exception as exc:
-            print(f"Scan failed: {type(exc).__name__}: {exc}", flush=True)
-            symbols = []
+        if cycle_started >= next_full_scan:
+            try:
+                hunter_symbols = run_scan(data_dir, top, ttl_hours)
+                print(
+                    f"Full scan complete; hunter candidates: {hunter_symbols or 'none'}",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(f"Scan failed: {type(exc).__name__}: {exc}", flush=True)
+            next_full_scan = cycle_started + interval_seconds
 
-        remaining = max(5.0, interval_seconds - (time.monotonic() - cycle_started))
+        try:
+            pulse_symbols = run_pulse(
+                data_dir,
+                pulse_cfg,
+                muted_alert_symbols=set(hunter_symbols),
+            )
+            print(
+                f"Pulse complete; pulse candidates: {pulse_symbols or 'none'}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"Pulse failed: {type(exc).__name__}: {exc}", flush=True)
+            pulse_symbols = []
+
+        symbols = list(dict.fromkeys(hunter_symbols + pulse_symbols))[:max_book_symbols]
+        print(f"Active order-book candidates: {symbols or 'none'}", flush=True)
+        until_full_scan = max(5.0, next_full_scan - time.monotonic())
+        remaining = max(5.0, min(float(pulse_interval_seconds), until_full_scan))
         if symbols:
             output = data_dir / "order_book" / f"{_utc_now():%Y-%m-%d}.jsonl.gz"
             try:
@@ -144,7 +231,7 @@ def main() -> None:
                 )
             except Exception as exc:
                 print(f"Order-book stream failed: {type(exc).__name__}: {exc}", flush=True)
-                time.sleep(min(60, remaining))
+                time.sleep(remaining)
         else:
             time.sleep(remaining)
 
