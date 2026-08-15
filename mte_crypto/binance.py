@@ -66,12 +66,11 @@ class BinancePublicClient:
         return frame
 
 
-def liquid_usdt_universe(
+def spot_usdt_tickers(
     client: BinancePublicClient,
-    min_quote_volume: float,
-    top: int,
     explicit_symbols: Iterable[str] | None = None,
 ) -> list[dict]:
+    """Return every eligible Binance Spot/USDT market with its 24h ticker."""
     info = client.exchange_info()
     status = {
         item["symbol"]: item
@@ -95,8 +94,6 @@ def liquid_usdt_universe(
         if not ticker:
             continue
         quote_volume = float(ticker.get("quoteVolume") or 0.0)
-        if not requested and quote_volume < min_quote_volume:
-            continue
         rows.append(
             {
                 "symbol": symbol,
@@ -107,4 +104,17 @@ def liquid_usdt_universe(
             }
         )
     rows.sort(key=lambda row: row["quote_volume_24h"], reverse=True)
+    return rows
+
+
+def liquid_usdt_universe(
+    client: BinancePublicClient,
+    min_quote_volume: float,
+    top: int,
+    explicit_symbols: Iterable[str] | None = None,
+) -> list[dict]:
+    rows = spot_usdt_tickers(client, explicit_symbols=explicit_symbols)
+    requested = bool(explicit_symbols)
+    if not requested:
+        rows = [row for row in rows if row["quote_volume_24h"] >= min_quote_volume]
     return rows[:top] if not requested else rows
