@@ -95,6 +95,8 @@ causal discovery layers:
 5. records top-20 order-book and executed taker-flow snapshots once per second
    for both hunter and pulse candidates;
 6. writes scans, pulse history, and compressed JSONL research data under `/data`.
+7. exposes a read-only live ledger at `/status` and `/status.json` after a
+   Railway public domain is generated for the service.
 
 Recommended Railway volume mount: `/data`. Optional environment variables:
 
@@ -108,6 +110,8 @@ Recommended Railway volume mount: `/data`. Optional environment variables:
 - `MTE_TELEGRAM_BOT_TOKEN` and `MTE_TELEGRAM_CHAT_ID` for alerts
 
 No Binance API key is used or needed. There is no order-placement code.
+The public status endpoints use a strict market-field allowlist; Telegram
+credentials, environment variables, and raw order-book files are never exposed.
 
 Download historical monthly archives (includes delisted pairs when
 `--all-historical` is used):
