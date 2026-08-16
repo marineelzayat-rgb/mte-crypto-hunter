@@ -48,27 +48,6 @@ class BinancePublicClient:
     def tickers_24h(self) -> list[dict]:
         return self._get("/api/v3/ticker/24hr")
 
-    def kline_rows(
-        self,
-        symbol: str,
-        *,
-        interval: str = "5m",
-        start_time_ms: int,
-        end_time_ms: int,
-        limit: int = 1000,
-    ) -> list[list]:
-        """Return raw public candles for a bounded historical interval."""
-        return self._get(
-            "/api/v3/klines",
-            {
-                "symbol": symbol,
-                "interval": interval,
-                "startTime": start_time_ms,
-                "endTime": end_time_ms,
-                "limit": min(limit, 1000),
-            },
-        )
-
     def klines(self, symbol: str, interval: str = "1h", limit: int = 1000, closed_only: bool = True) -> pd.DataFrame:
         raw = self._get(
             "/api/v3/klines",
