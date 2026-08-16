@@ -8,13 +8,7 @@ import os
 from pathlib import Path
 import time
 
-from .alert_store import (
-    backfill_legacy_outcomes,
-    bootstrap_active_alerts,
-    record_alert,
-    seed_legacy_alerts,
-    update_alert_outcomes,
-)
+from .alert_store import bootstrap_active_alerts, record_alert, update_alert_outcomes
 from .binance import BinancePublicClient, spot_usdt_tickers
 from .book_collector import collect
 from .config import DEFAULT_CONFIG
@@ -164,7 +158,6 @@ def main() -> None:
     data_dir = Path(os.getenv("MTE_DATA_DIR", "output/live"))
     data_dir.mkdir(parents=True, exist_ok=True)
     bootstrap_active_alerts(data_dir)
-    legacy_seeded = seed_legacy_alerts(data_dir)
     top = int(os.getenv("MTE_SCAN_TOP", "120"))
     interval_seconds = max(300, int(os.getenv("MTE_SCAN_INTERVAL_SECONDS", "3600")))
     ttl_hours = max(1, int(os.getenv("MTE_CANDIDATE_TTL_HOURS", "48")))
@@ -184,17 +177,6 @@ def main() -> None:
         print(f"Status server started on port {port}", flush=True)
     except OSError as exc:
         print(f"Status server failed: {type(exc).__name__}: {exc}", flush=True)
-
-    legacy_backfilled = backfill_legacy_outcomes(
-        data_dir,
-        BinancePublicClient(DEFAULT_CONFIG.api_base),
-        now=_utc_now(),
-    )
-    if legacy_seeded or legacy_backfilled:
-        print(
-            f"Legacy alerts restored={legacy_seeded}, backfilled={legacy_backfilled}",
-            flush=True,
-        )
 
     print(
         f"MTE daemon started: top={top}, scan_every={interval_seconds}s, "
