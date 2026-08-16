@@ -6,8 +6,10 @@ import unittest
 from urllib.request import urlopen
 
 from mte_crypto.alert_store import (
+    backfill_legacy_outcomes,
     bootstrap_active_alerts,
     record_alert,
+    seed_legacy_alerts,
     status_payload,
     update_alert_outcomes,
 )
@@ -18,6 +20,34 @@ UTC = timezone.utc
 
 
 class AlertStoreTests(unittest.TestCase):
+    def test_legacy_alerts_are_seeded_once_and_backfilled_from_candles(self):
+        class FakeClient:
+            def kline_rows(self, symbol, **kwargs):
+                start = kwargs["start_time_ms"]
+                return [
+                    [start, "1", "0.160", "0.140", "0.150"],
+                    [start + 6 * 3_600_000, "1", "0.155", "0.130", "0.135"],
+                ]
+
+        with tempfile.TemporaryDirectory() as temporary:
+            data_dir = Path(temporary)
+            self.assertEqual(seed_legacy_alerts(data_dir), 2)
+            self.assertEqual(seed_legacy_alerts(data_dir), 0)
+            restored = backfill_legacy_outcomes(
+                data_dir,
+                FakeClient(),
+                now=datetime(2026, 8, 16, 3, 0, tzinfo=UTC),
+            )
+            self.assertEqual(restored, 2)
+            cow = next(
+                item
+                for item in status_payload(data_dir)["alerts"]
+                if item["symbol"] == "COWUSDT"
+            )
+            self.assertAlmostEqual(cow["outcome"]["max_return"], 0.160 / 0.1465 - 1)
+            self.assertAlmostEqual(cow["outcome"]["min_return"], 0.130 / 0.1465 - 1)
+            self.assertIn("6h", cow["outcome"]["checkpoints"])
+
     def test_public_ledger_tracks_outcomes_without_leaking_unknown_fields(self):
         with tempfile.TemporaryDirectory() as temporary:
             data_dir = Path(temporary)
