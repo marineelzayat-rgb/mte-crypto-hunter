@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import time
 
+from .alert_store import bootstrap_active_alerts, record_alert, update_alert_outcomes
 from .binance import BinancePublicClient, spot_usdt_tickers
 from .book_collector import collect
 from .config import DEFAULT_CONFIG
@@ -21,6 +22,7 @@ from .pulse import (
     update_pulse_candidates,
 )
 from .scan import scan_market
+from .status_server import start_status_server
 
 
 UTC = timezone.utc
@@ -96,6 +98,7 @@ def run_scan(data_dir: Path, top: int, ttl_hours: int) -> list[str]:
     _write_json(active_path, active)
     _write_json(states_path, states)
     for row in new_alerts:
+        record_alert(data_dir, row, source="hunter", observed_at=now)
         message = format_alert(row)
         if not send_telegram(message):
             print(message, flush=True)
@@ -136,11 +139,13 @@ def run_pulse(
     )
     muted = muted_alert_symbols or set()
     for row in new_alerts:
+        record_alert(data_dir, row, source="pulse", observed_at=now)
         if row["symbol"] in muted:
             continue
         message = format_pulse_alert(row)
         if not send_telegram(message):
             print(message, flush=True)
+    update_alert_outcomes(data_dir, markets, now=now)
 
     priority = {"EARLY_PULSE": 0, "RAPID_MOVE_NO_CHASE": 1}
     return sorted(
@@ -151,6 +156,8 @@ def run_pulse(
 
 def main() -> None:
     data_dir = Path(os.getenv("MTE_DATA_DIR", "output/live"))
+    data_dir.mkdir(parents=True, exist_ok=True)
+    bootstrap_active_alerts(data_dir)
     top = int(os.getenv("MTE_SCAN_TOP", "120"))
     interval_seconds = max(300, int(os.getenv("MTE_SCAN_INTERVAL_SECONDS", "3600")))
     ttl_hours = max(1, int(os.getenv("MTE_CANDIDATE_TTL_HOURS", "48")))
@@ -163,6 +170,13 @@ def main() -> None:
         DEFAULT_PULSE_CONFIG,
         ttl_minutes=max(15, int(os.getenv("MTE_PULSE_TTL_MINUTES", "120"))),
     )
+
+    port = int(os.getenv("PORT", "8080"))
+    try:
+        start_status_server(data_dir, port)
+        print(f"Status server started on port {port}", flush=True)
+    except OSError as exc:
+        print(f"Status server failed: {type(exc).__name__}: {exc}", flush=True)
 
     print(
         f"MTE daemon started: top={top}, scan_every={interval_seconds}s, "
