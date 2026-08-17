@@ -8,11 +8,19 @@ import os
 from pathlib import Path
 import time
 
+import numpy as np
+
 from .alert_store import bootstrap_active_alerts, record_alert, update_alert_outcomes
 from .binance import BinancePublicClient, spot_usdt_tickers
 from .book_collector import collect
 from .config import DEFAULT_CONFIG
+from .features import wilder_atr
 from .monitor import format_alert, send_telegram
+from .paper_portfolio import (
+    ensure_paper_portfolio,
+    open_paper_position,
+    update_paper_portfolio,
+)
 from .pulse import (
     DEFAULT_PULSE_CONFIG,
     PulseConfig,
@@ -139,13 +147,37 @@ def run_pulse(
     )
     muted = muted_alert_symbols or set()
     for row in new_alerts:
-        record_alert(data_dir, row, source="pulse", observed_at=now)
+        record = record_alert(data_dir, row, source="pulse", observed_at=now)
+        open_paper_position(data_dir, record, now=now)
         if row["symbol"] in muted:
             continue
         message = format_pulse_alert(row)
         if not send_telegram(message):
             print(message, flush=True)
     update_alert_outcomes(data_dir, markets, now=now)
+
+    def hourly_atr(symbol: str) -> tuple[float, str] | None:
+        try:
+            frame = client.klines(symbol, "1h", limit=40, closed_only=True)
+        except Exception as exc:
+            print(
+                f"Paper ATR fetch failed for {symbol}: {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            return None
+        if len(frame) < 14:
+            return None
+        atr = float(wilder_atr(frame, 14).iloc[-1])
+        if not np.isfinite(atr) or atr <= 0:
+            return None
+        return atr, frame.index[-1].isoformat()
+
+    update_paper_portfolio(
+        data_dir,
+        markets,
+        now=now,
+        atr_provider=hourly_atr,
+    )
 
     priority = {"EARLY_PULSE": 0, "RAPID_MOVE_NO_CHASE": 1}
     return sorted(
@@ -158,6 +190,7 @@ def main() -> None:
     data_dir = Path(os.getenv("MTE_DATA_DIR", "output/live"))
     data_dir.mkdir(parents=True, exist_ok=True)
     bootstrap_active_alerts(data_dir)
+    ensure_paper_portfolio(data_dir)
     top = int(os.getenv("MTE_SCAN_TOP", "120"))
     interval_seconds = max(300, int(os.getenv("MTE_SCAN_INTERVAL_SECONDS", "3600")))
     ttl_hours = max(1, int(os.getenv("MTE_CANDIDATE_TTL_HOURS", "48")))

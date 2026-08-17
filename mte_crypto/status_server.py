@@ -8,6 +8,13 @@ import threading
 from urllib.parse import urlparse
 
 from .alert_store import status_payload
+from .paper_portfolio import paper_portfolio_payload
+
+
+def _full_status_payload(data_dir: Path) -> dict:
+    payload = status_payload(data_dir)
+    payload["paper_portfolio"] = paper_portfolio_payload(data_dir)
+    return payload
 
 
 def _percent(value) -> str:
@@ -22,6 +29,13 @@ def _percent(value) -> str:
 def _price(value) -> str:
     try:
         return f"{float(value or 0):.8g}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _money(value) -> str:
+    try:
+        return f"${float(value or 0):,.2f}"
     except (TypeError, ValueError):
         return "—"
 
@@ -52,6 +66,38 @@ def render_status_html(payload: dict) -> str:
     active = payload.get("active") or {}
     hunter_count = len(active.get("hunter") or {})
     pulse_count = len(active.get("pulse") or {})
+    paper = payload.get("paper_portfolio") or {}
+    position_rows = []
+    for position in paper.get("open_positions", []):
+        position_rows.append(
+            "<tr>"
+            f"<td>{escape(str(position.get('slot_id', '—')))}</td>"
+            f"<td><strong>{escape(str(position.get('symbol', '—')))}</strong></td>"
+            f"<td>{escape(str(position.get('opened_at', '—'))[:19].replace('T', ' '))} UTC</td>"
+            f"<td>{escape(_price(position.get('entry_price')))}</td>"
+            f"<td>{escape(_price(position.get('current_price')))}</td>"
+            f"<td>{escape(_price(position.get('stop_price')))}</td>"
+            f"<td>{'ACTIVE' if position.get('trail_active') else 'WAITING +5%'}</td>"
+            f"<td>{_percent(position.get('current_return'))}</td>"
+            f"<td>{escape(_money(position.get('unrealized_pnl')))}</td>"
+            "</tr>"
+        )
+    positions_body = "".join(position_rows) or '<tr><td colspan="9">No paper positions open.</td></tr>'
+    closed_rows = []
+    for trade in (paper.get("closed_trades") or [])[:20]:
+        closed_rows.append(
+            "<tr>"
+            f"<td>{escape(str(trade.get('slot_id', '—')))}</td>"
+            f"<td><strong>{escape(str(trade.get('symbol', '—')))}</strong></td>"
+            f"<td>{escape(str(trade.get('closed_at', '—'))[:19].replace('T', ' '))} UTC</td>"
+            f"<td>{escape(str(trade.get('exit_reason', '—')))}</td>"
+            f"<td>{escape(_price(trade.get('entry_price')))}</td>"
+            f"<td>{escape(_price(trade.get('exit_price')))}</td>"
+            f"<td>{_percent(trade.get('return'))}</td>"
+            f"<td>{escape(_money(trade.get('pnl')))}</td>"
+            "</tr>"
+        )
+    closed_body = "".join(closed_rows) or '<tr><td colspan="8">No paper trades closed yet.</td></tr>'
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="30"><title>MTE Crypto Hunter Status</title>
@@ -59,6 +105,7 @@ def render_status_html(payload: dict) -> str:
 :root{{--bg:#090b10;--card:#111622;--line:#273044;--text:#eef2ff;--muted:#9aa5bd;--green:#3ddc97}}
 *{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font:14px system-ui,-apple-system,sans-serif}}
 main{{max-width:1500px;margin:auto;padding:22px}}h1{{margin:0 0 6px}}p{{color:var(--muted)}}.pill{{display:inline-block;padding:6px 10px;border:1px solid var(--line);border-radius:99px;margin:4px}}
+.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:18px}}.card{{padding:14px;border:1px solid var(--line);border-radius:14px;background:var(--card)}}.label{{color:var(--muted);font-size:12px}}.value{{font-size:22px;font-weight:700;margin-top:4px}}
 .wrap{{overflow:auto;border:1px solid var(--line);border-radius:14px;background:var(--card);margin-top:18px}}
 table{{border-collapse:collapse;width:100%;min-width:1250px}}th,td{{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}}th{{color:var(--muted);position:sticky;top:0;background:var(--card)}}
 .ok{{color:var(--green)}}a{{color:#8ab4ff}}</style></head>
@@ -67,6 +114,21 @@ table{{border-collapse:collapse;width:100%;min-width:1250px}}th,td{{padding:10px
 <div><span class="pill">Hunter active: {hunter_count}</span>
 <span class="pill">Pulse active: {pulse_count}</span>
 <span class="pill"><a href="/status.json">JSON</a></span></div>
+<h2>Wave Rider paper portfolio</h2>
+<p>Starts at $100 · 16 isolated slots · EARLY_PULSE only · 7.5% initial stop · hourly 2.5 ATR trail after +5% · 24h maximum hold.</p>
+<div class="cards">
+<div class="card"><div class="label">Paper equity</div><div class="value">{escape(_money(paper.get('equity')))}</div></div>
+<div class="card"><div class="label">Total return</div><div class="value">{_percent(paper.get('total_return'))}</div></div>
+<div class="card"><div class="label">Open positions</div><div class="value">{paper.get('open_count', 0)} / {paper.get('max_positions', 16)}</div></div>
+<div class="card"><div class="label">Available slots</div><div class="value">{paper.get('available_slots', 16)}</div></div>
+<div class="card"><div class="label">Realized P&amp;L</div><div class="value">{escape(_money(paper.get('realized_pnl')))}</div></div>
+</div>
+<div class="wrap"><table><thead><tr><th>Slot</th><th>Symbol</th><th>Opened</th><th>Entry</th><th>Current</th><th>Stop</th><th>Trail</th><th>Return</th><th>Unrealized P&amp;L</th></tr></thead>
+<tbody>{positions_body}</tbody></table></div>
+<h2>Recent paper exits</h2>
+<div class="wrap"><table><thead><tr><th>Slot</th><th>Symbol</th><th>Closed</th><th>Reason</th><th>Entry</th><th>Exit</th><th>Return</th><th>P&amp;L</th></tr></thead>
+<tbody>{closed_body}</tbody></table></div>
+<h2>Discovery ledger</h2>
 <div class="wrap"><table><thead><tr><th>Detected</th><th>Symbol</th><th>State</th><th>Source</th><th>Price</th><th>24h at alert</th><th>Current</th><th>Max</th><th>Min</th><th>6h</th><th>12h</th><th>24h</th><th>48h</th></tr></thead>
 <tbody>{body}</tbody></table></div></main></body></html>"""
 
@@ -79,11 +141,11 @@ def make_handler(data_dir: Path):
                 self._send(b'{"status":"ok"}', "application/json")
                 return
             if path == "/status.json":
-                payload = json.dumps(status_payload(data_dir), separators=(",", ":")).encode()
+                payload = json.dumps(_full_status_payload(data_dir), separators=(",", ":")).encode()
                 self._send(payload, "application/json")
                 return
             if path in {"/", "/status"}:
-                html = render_status_html(status_payload(data_dir)).encode()
+                html = render_status_html(_full_status_payload(data_dir)).encode()
                 self._send(html, "text/html; charset=utf-8")
                 return
             self.send_error(404)
