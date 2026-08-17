@@ -101,6 +101,9 @@ causal discovery layers:
    with $6.25 each. The research-only Wave Rider uses a 7.5% initial stop,
    activates after +5%, then raises an hourly Chandelier stop at 2.5 ATR. It
    has no fixed profit target and closes any remaining position after 24 hours.
+9. mirrors every accepted paper entry and exit in a separate USD-M Futures 2x
+   shadow ledger. It enters at the futures ask, exits at the bid, and records
+   spread, mark/index basis, estimated taker fees, and observed funding.
 
 Recommended Railway volume mount: `/data`. Optional environment variables:
 
@@ -118,6 +121,8 @@ The public status endpoints use a strict market-field allowlist; Telegram
 credentials, environment variables, and raw order-book files are never exposed.
 The `$100` Wave Rider portfolio shown on the status page is simulated only;
 entry and exit fees are estimated at 0.1% per side and no real funds are used.
+The parallel `$100` Futures 2x shadow is also simulated only. It never submits
+an order and uses public USD-M market data without exchange credentials.
 
 Download historical monthly archives (includes delisted pairs when
 `--all-historical` is used):
