@@ -66,6 +66,66 @@ class BinancePublicClient:
         return frame
 
 
+class BinanceFuturesPublicClient(BinancePublicClient):
+    """Dependency-free client for public Binance USD-M Futures market data."""
+
+    def __init__(
+        self,
+        base_url: str = "https://fapi.binance.com",
+        timeout: float = 20.0,
+        retries: int = 3,
+    ):
+        super().__init__(base_url, timeout=timeout, retries=retries)
+
+    def exchange_info(self) -> dict:
+        return self._get("/fapi/v1/exchangeInfo")
+
+    def book_tickers(self) -> list[dict]:
+        return self._get("/fapi/v1/ticker/bookTicker")
+
+    def premium_index(self) -> list[dict]:
+        return self._get("/fapi/v1/premiumIndex")
+
+
+def usd_m_futures_snapshots(client: BinanceFuturesPublicClient) -> dict[str, dict]:
+    """Return executable quotes and funding metadata for trading perpetuals."""
+    info = client.exchange_info()
+    eligible = {
+        item.get("symbol")
+        for item in info.get("symbols", [])
+        if item.get("status") == "TRADING"
+        and item.get("quoteAsset") == "USDT"
+        and item.get("contractType") == "PERPETUAL"
+    }
+    books = {item.get("symbol"): item for item in client.book_tickers()}
+    premiums = {item.get("symbol"): item for item in client.premium_index()}
+    snapshots: dict[str, dict] = {}
+    for symbol in eligible:
+        book = books.get(symbol) or {}
+        premium = premiums.get(symbol) or {}
+        try:
+            bid = float(book.get("bidPrice") or 0.0)
+            ask = float(book.get("askPrice") or 0.0)
+            mark = float(premium.get("markPrice") or 0.0)
+            index = float(premium.get("indexPrice") or 0.0)
+            funding_rate = float(premium.get("lastFundingRate") or 0.0)
+            next_funding_time = int(premium.get("nextFundingTime") or 0)
+        except (TypeError, ValueError):
+            continue
+        if bid <= 0 or ask <= 0 or ask < bid or mark <= 0:
+            continue
+        snapshots[str(symbol)] = {
+            "symbol": str(symbol),
+            "bid": bid,
+            "ask": ask,
+            "mark": mark,
+            "index": index or None,
+            "last_funding_rate": funding_rate,
+            "next_funding_time": next_funding_time or None,
+        }
+    return snapshots
+
+
 def spot_usdt_tickers(
     client: BinancePublicClient,
     explicit_symbols: Iterable[str] | None = None,
