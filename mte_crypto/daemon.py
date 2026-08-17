@@ -11,10 +11,20 @@ import time
 import numpy as np
 
 from .alert_store import bootstrap_active_alerts, record_alert, update_alert_outcomes
-from .binance import BinancePublicClient, spot_usdt_tickers
+from .binance import (
+    BinanceFuturesPublicClient,
+    BinancePublicClient,
+    spot_usdt_tickers,
+    usd_m_futures_snapshots,
+)
 from .book_collector import collect
 from .config import DEFAULT_CONFIG
 from .features import wilder_atr
+from .futures_shadow import (
+    ensure_futures_shadow,
+    open_futures_shadow,
+    update_futures_shadow,
+)
 from .monitor import format_alert, send_telegram
 from .paper_portfolio import (
     ensure_paper_portfolio,
@@ -122,6 +132,14 @@ def run_pulse(
     now = _utc_now()
     client = BinancePublicClient(DEFAULT_CONFIG.api_base)
     markets = spot_usdt_tickers(client)
+    futures_snapshots: dict[str, dict] = {}
+    try:
+        futures_snapshots = usd_m_futures_snapshots(BinanceFuturesPublicClient())
+    except Exception as exc:
+        print(
+            f"Futures shadow market data failed: {type(exc).__name__}: {exc}",
+            flush=True,
+        )
     history_path = data_dir / "pulse_history.json"
     active_path = data_dir / "pulse_candidates.json"
     history = _read_json(history_path)
@@ -148,7 +166,14 @@ def run_pulse(
     muted = muted_alert_symbols or set()
     for row in new_alerts:
         record = record_alert(data_dir, row, source="pulse", observed_at=now)
-        open_paper_position(data_dir, record, now=now)
+        spot_open = open_paper_position(data_dir, record, now=now)
+        if spot_open.get("opened"):
+            open_futures_shadow(
+                data_dir,
+                spot_open,
+                futures_snapshots.get(str(record.get("symbol") or "")),
+                now=now,
+            )
         if row["symbol"] in muted:
             continue
         message = format_pulse_alert(row)
@@ -172,11 +197,17 @@ def run_pulse(
             return None
         return atr, frame.index[-1].isoformat()
 
-    update_paper_portfolio(
+    spot_closed = update_paper_portfolio(
         data_dir,
         markets,
         now=now,
         atr_provider=hourly_atr,
+    )
+    update_futures_shadow(
+        data_dir,
+        futures_snapshots,
+        spot_closed,
+        now=now,
     )
 
     priority = {"EARLY_PULSE": 0, "RAPID_MOVE_NO_CHASE": 1}
@@ -191,6 +222,7 @@ def main() -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
     bootstrap_active_alerts(data_dir)
     ensure_paper_portfolio(data_dir)
+    ensure_futures_shadow(data_dir)
     top = int(os.getenv("MTE_SCAN_TOP", "120"))
     interval_seconds = max(300, int(os.getenv("MTE_SCAN_INTERVAL_SECONDS", "3600")))
     ttl_hours = max(1, int(os.getenv("MTE_CANDIDATE_TTL_HOURS", "48")))
