@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import time
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
@@ -22,6 +23,7 @@ from .config import DEFAULT_CONFIG
 from .features import wilder_atr
 from .futures_shadow import (
     ensure_futures_shadow,
+    futures_shadow_payload,
     open_futures_shadow,
     update_futures_shadow,
 )
@@ -29,6 +31,7 @@ from .monitor import format_alert, send_telegram
 from .paper_portfolio import (
     ensure_paper_portfolio,
     open_paper_position,
+    paper_portfolio_payload,
     update_paper_portfolio,
 )
 from .pulse import (
@@ -44,6 +47,7 @@ from .status_server import start_status_server
 
 
 UTC = timezone.utc
+CAIRO = ZoneInfo("Africa/Cairo")
 ALERT_STATE = "HUNTER_ALERT"
 
 
@@ -63,6 +67,91 @@ def _write_json(path: Path, value: dict | list) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, indent=2, sort_keys=True))
     temporary.replace(path)
+
+
+def _percent(value) -> str:
+    return f"{100 * float(value or 0):+.2f}%"
+
+
+def _money(value) -> str:
+    return f"${float(value or 0):,.2f}"
+
+
+def send_paper_telegram_updates(
+    data_dir: Path,
+    spot_closed: list[dict],
+    futures_closed: list[dict],
+    *,
+    now: datetime,
+) -> list[str]:
+    """Send close notifications and one 21:00 Cairo paper summary per day."""
+    if not (
+        os.environ.get("MTE_TELEGRAM_BOT_TOKEN")
+        and os.environ.get("MTE_TELEGRAM_CHAT_ID")
+    ):
+        return []
+    spot = paper_portfolio_payload(data_dir)
+    futures = futures_shadow_payload(data_dir)
+    futures_by_slot = {int(item["slot_id"]): item for item in futures_closed}
+    sent_messages: list[str] = []
+
+    for trade in spot_closed:
+        shadow = futures_by_slot.get(int(trade["slot_id"]))
+        futures_line = (
+            f"Futures 2x: {_percent(shadow.get('return'))} "
+            f"({_money(shadow.get('pnl'))})"
+            if shadow
+            else "Futures 2x: not available for this trade"
+        )
+        message = (
+            "MTE PAPER — TRADE CLOSED\n"
+            f"{trade.get('symbol')} | {trade.get('exit_reason')}\n"
+            f"Spot 1x: {_percent(trade.get('return'))} "
+            f"({_money(trade.get('pnl'))})\n"
+            f"{futures_line}\n"
+            f"Balances: Spot {_money(spot.get('equity'))} | "
+            f"Futures 2x {_money(futures.get('equity'))}\n"
+            "Paper research only — no real order"
+        )
+        try:
+            if send_telegram(message):
+                sent_messages.append(message)
+        except Exception as exc:
+            print(
+                f"Paper close Telegram failed: {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+
+    local_now = now.astimezone(CAIRO)
+    summary_path = data_dir / "telegram_paper_summary.json"
+    summary_state = _read_json(summary_path)
+    today = local_now.date().isoformat()
+    if local_now.hour >= 21 and summary_state.get("last_sent_date") != today:
+        message = (
+            "MTE PAPER — DAILY SUMMARY\n"
+            f"Spot 1x balance: {_money(spot.get('equity'))} "
+            f"({_percent(spot.get('total_return'))})\n"
+            f"Futures 2x balance: {_money(futures.get('equity'))} "
+            f"({_percent(futures.get('total_return'))})\n"
+            f"Open positions: Spot {spot.get('open_count', 0)}/16 | "
+            f"Futures {futures.get('open_count', 0)}/16\n"
+            f"Closed trades: Spot {len(spot.get('closed_trades') or [])} | "
+            f"Futures {len(futures.get('closed_trades') or [])}\n"
+            "Paper research only — no real orders"
+        )
+        try:
+            if send_telegram(message):
+                sent_messages.append(message)
+                _write_json(
+                    summary_path,
+                    {"last_sent_date": today, "sent_at": now.isoformat()},
+                )
+        except Exception as exc:
+            print(
+                f"Daily paper Telegram failed: {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+    return sent_messages
 
 
 def update_active_candidates(
@@ -203,10 +292,16 @@ def run_pulse(
         now=now,
         atr_provider=hourly_atr,
     )
-    update_futures_shadow(
+    futures_closed = update_futures_shadow(
         data_dir,
         futures_snapshots,
         spot_closed,
+        now=now,
+    )
+    send_paper_telegram_updates(
+        data_dir,
+        spot_closed,
+        futures_closed,
         now=now,
     )
 
