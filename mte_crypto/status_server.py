@@ -8,12 +8,14 @@ import threading
 from urllib.parse import urlparse
 
 from .alert_store import status_payload
+from .futures_shadow import futures_shadow_payload
 from .paper_portfolio import paper_portfolio_payload
 
 
 def _full_status_payload(data_dir: Path) -> dict:
     payload = status_payload(data_dir)
     payload["paper_portfolio"] = paper_portfolio_payload(data_dir)
+    payload["futures_shadow"] = futures_shadow_payload(data_dir)
     return payload
 
 
@@ -67,6 +69,7 @@ def render_status_html(payload: dict) -> str:
     hunter_count = len(active.get("hunter") or {})
     pulse_count = len(active.get("pulse") or {})
     paper = payload.get("paper_portfolio") or {}
+    futures = payload.get("futures_shadow") or {}
     position_rows = []
     for position in paper.get("open_positions", []):
         position_rows.append(
@@ -98,6 +101,21 @@ def render_status_html(payload: dict) -> str:
             "</tr>"
         )
     closed_body = "".join(closed_rows) or '<tr><td colspan="8">No paper trades closed yet.</td></tr>'
+    futures_rows = []
+    for position in futures.get("open_positions", []):
+        futures_rows.append(
+            "<tr>"
+            f"<td>{escape(str(position.get('slot_id', '—')))}</td>"
+            f"<td><strong>{escape(str(position.get('symbol', '—')))}</strong></td>"
+            f"<td>{escape(_price(position.get('entry_price')))}</td>"
+            f"<td>{escape(_price(position.get('current_bid')))}</td>"
+            f"<td>{_percent(position.get('entry_spread'))}</td>"
+            f"<td>{_percent(position.get('last_funding_rate'))}</td>"
+            f"<td>{_percent(position.get('current_return'))}</td>"
+            f"<td>{escape(_money(position.get('unrealized_pnl')))}</td>"
+            "</tr>"
+        )
+    futures_body = "".join(futures_rows) or '<tr><td colspan="8">No 2x shadow positions open.</td></tr>'
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="30"><title>MTE Crypto Hunter Status</title>
@@ -128,6 +146,17 @@ table{{border-collapse:collapse;width:100%;min-width:1250px}}th,td{{padding:10px
 <h2>Recent paper exits</h2>
 <div class="wrap"><table><thead><tr><th>Slot</th><th>Symbol</th><th>Closed</th><th>Reason</th><th>Entry</th><th>Exit</th><th>Return</th><th>P&amp;L</th></tr></thead>
 <tbody>{closed_body}</tbody></table></div>
+<h2>USD-M Futures 2x shadow</h2>
+<p>Mirrors the same accepted spot entries and exits · long 2x · executable ask/bid prices · estimated taker fees and observed funding · PAPER ONLY, no orders.</p>
+<div class="cards">
+<div class="card"><div class="label">2x shadow equity</div><div class="value">{escape(_money(futures.get('equity')))}</div></div>
+<div class="card"><div class="label">2x total return</div><div class="value">{_percent(futures.get('total_return'))}</div></div>
+<div class="card"><div class="label">Open positions</div><div class="value">{futures.get('open_count', 0)} / {futures.get('max_positions', 16)}</div></div>
+<div class="card"><div class="label">Estimated fees</div><div class="value">{escape(_money(futures.get('fees')))}</div></div>
+<div class="card"><div class="label">Funding P&amp;L</div><div class="value">{escape(_money(futures.get('funding_pnl')))}</div></div>
+</div>
+<div class="wrap"><table><thead><tr><th>Slot</th><th>Symbol</th><th>Entry ask</th><th>Current bid</th><th>Entry spread</th><th>Funding rate</th><th>Return</th><th>Unrealized P&amp;L</th></tr></thead>
+<tbody>{futures_body}</tbody></table></div>
 <h2>Discovery ledger</h2>
 <div class="wrap"><table><thead><tr><th>Detected</th><th>Symbol</th><th>State</th><th>Source</th><th>Price</th><th>24h at alert</th><th>Current</th><th>Max</th><th>Min</th><th>6h</th><th>12h</th><th>24h</th><th>48h</th></tr></thead>
 <tbody>{body}</tbody></table></div></main></body></html>"""
