@@ -8,6 +8,13 @@ import threading
 from urllib.parse import urlparse
 
 from .alert_store import status_payload
+from .paper_portfolio import paper_portfolio_payload
+
+
+def _full_status_payload(data_dir: Path) -> dict:
+    payload = status_payload(data_dir)
+    payload["paper_portfolio"] = paper_portfolio_payload(data_dir)
+    return payload
 
 
 def _percent(value) -> str:
@@ -134,11 +141,11 @@ def make_handler(data_dir: Path):
                 self._send(b'{"status":"ok"}', "application/json")
                 return
             if path == "/status.json":
-                payload = json.dumps(status_payload(data_dir), separators=(",", ":")).encode()
+                payload = json.dumps(_full_status_payload(data_dir), separators=(",", ":")).encode()
                 self._send(payload, "application/json")
                 return
             if path in {"/", "/status"}:
-                html = render_status_html(status_payload(data_dir)).encode()
+                html = render_status_html(_full_status_payload(data_dir)).encode()
                 self._send(html, "text/html; charset=utf-8")
                 return
             self.send_error(404)
