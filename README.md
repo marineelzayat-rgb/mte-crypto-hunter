@@ -97,6 +97,10 @@ causal discovery layers:
 6. writes scans, pulse history, and compressed JSONL research data under `/data`.
 7. exposes a read-only live ledger at `/status` and `/status.json` after a
    Railway public domain is generated for the service.
+8. paper-trades each new `EARLY_PULSE` in one of 16 isolated slots that start
+   with $6.25 each. The research-only Wave Rider uses a 7.5% initial stop,
+   activates after +5%, then raises an hourly Chandelier stop at 2.5 ATR. It
+   has no fixed profit target and closes any remaining position after 24 hours.
 
 Recommended Railway volume mount: `/data`. Optional environment variables:
 
@@ -112,6 +116,8 @@ Recommended Railway volume mount: `/data`. Optional environment variables:
 No Binance API key is used or needed. There is no order-placement code.
 The public status endpoints use a strict market-field allowlist; Telegram
 credentials, environment variables, and raw order-book files are never exposed.
+The `$100` Wave Rider portfolio shown on the status page is simulated only;
+entry and exit fees are estimated at 0.1% per side and no real funds are used.
 
 Download historical monthly archives (includes delisted pairs when
 `--all-historical` is used):
