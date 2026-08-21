@@ -214,18 +214,18 @@ def send_live_futures_telegram_updates(
     messages: list[str] = []
     for position in opened:
         message = (
-            "MTE LIVE FUTURES 2x — LONG FILLED\n"
+            "MTE LIVE FUTURES 4x — LONG FILLED\n"
             f"{position.get('symbol')} @ {_money(position.get('entry_price'))}\n"
             f"Isolated margin: {_money(position.get('entry_margin'))}\n"
             f"Position notional: {_money(position.get('entry_notional'))}\n"
             f"Exchange hard stop: {_money(position.get('hard_stop_price'))}\n"
-            "Real Binance USD-M order — isolated 2x"
+            "Real Binance USD-M order — isolated 4x compounding"
         )
         if send_telegram(message):
             messages.append(message)
     for trade in closed:
         message = (
-            "MTE LIVE FUTURES 2x — POSITION CLOSED\n"
+            "MTE LIVE FUTURES 4x — POSITION CLOSED\n"
             f"{trade.get('symbol')} | {trade.get('exit_reason')}\n"
             f"Exit: {_money(trade.get('exit_price'))}\n"
             f"Estimated realized P&L: {_money(trade.get('pnl'))}\n"
