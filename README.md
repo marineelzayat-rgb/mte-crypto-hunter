@@ -117,6 +117,11 @@ causal discovery layers:
     It is `SAFE_DISABLED` by default and requires two separate environment
     gates before it can submit an order. A newly filled buy must receive an
     exchange-side 7.5% hard stop immediately or the position is flattened.
+11. includes a separate optional RSA-authenticated Binance USD-M Futures layer.
+    It opens one-way, isolated 2x longs only, uses $11 margin per position by
+    default, and sends the hard stop to Binance's conditional-algo service
+    immediately. Failure to attach that stop triggers an emergency reduce-only
+    market close. It is independently `SAFE_DISABLED` by default.
 
 Recommended Railway volume mount: `/data`. Optional environment variables:
 
@@ -142,7 +147,29 @@ has passed):
 - `MTE_LIVE_RESERVE_USDT` (default `12`)
 - `MTE_LIVE_DAILY_LOSS_LIMIT_USDT` (default `8`)
 
-The public status page exposes only connection/mode counts for the real account;
+Optional real-Futures variables (use a separate RSA API key and do not enable
+until the read-only connection check has passed):
+
+- `BINANCE_FUTURES_API_KEY`
+- `BINANCE_FUTURES_RSA_PRIVATE_KEY_B64` (PKCS#8 RSA PEM encoded as base64)
+- `MTE_LIVE_FUTURES_ENABLED` (default `false`)
+- `MTE_LIVE_FUTURES_CONFIRMATION` (must exactly equal the separately
+  documented arming phrase)
+- `MTE_LIVE_FUTURES_MAX_POSITIONS` (default `8`)
+- `MTE_LIVE_FUTURES_MARGIN_USDT` (default `11`, producing about $22 notional
+  at fixed 2x leverage)
+- `MTE_LIVE_FUTURES_RESERVE_USDT` (default `12`)
+- `MTE_LIVE_FUTURES_DAILY_LOSS_LIMIT_USDT` (default `8`)
+- `MTE_LIVE_FUTURES_INITIAL_STOP_PCT` (default `0.075`)
+
+The real Futures layer rejects hedge mode and multi-assets margin mode. It
+requires USD-M one-way mode, uses isolated margin, and always requests exactly
+2x leverage. If both real Spot and real Futures entry gates are armed, new real
+entries go to Futures only so the same signal is not bought twice. Existing
+positions in either layer continue to be reconciled even after new entries are
+disabled.
+
+The public status page exposes only connection/mode counts for the real accounts;
 it deliberately redacts the Binance balance, symbols, quantities, order IDs,
 events, API key, and private key. Real fills are reported privately by Telegram.
 
@@ -186,4 +213,7 @@ Signals and features are computed only from information available at the timesta
 - Paper and alert automation remain the default. The optional real-Spot layer
   reads credentials only from Railway environment variables and is disabled
   unless both independent live gates are armed.
+- The optional real-Futures layer uses a separate RSA key and two independent
+  live gates. Withdrawal and universal-transfer permissions are not required
+  and should remain disabled.
 - Real execution must include spread, slippage, fees, funding, and exchange-specific wick behavior.
