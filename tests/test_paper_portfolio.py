@@ -38,7 +38,7 @@ class PaperPortfolioTests(unittest.TestCase):
         self.assertEqual(len(state["slots"]), 2)
         self.assertEqual([slot["balance"] for slot in state["slots"]], [50.0, 50.0])
 
-    def test_opens_only_early_pulse_and_rejects_duplicate_or_full_slots(self):
+    def test_opens_entry_states_and_rejects_duplicate_or_full_slots(self):
         first = open_paper_position(
             self.data_dir, self.alert(), now=self.now, cfg=self.cfg
         )
@@ -54,21 +54,22 @@ class PaperPortfolioTests(unittest.TestCase):
         )
         self.assertEqual(duplicate["reason"], "DUPLICATE_SYMBOL")
 
-        ignored = open_paper_position(
+        bull = open_paper_position(
             self.data_dir,
-            self.alert("NOCHASEUSDT", state="RAPID_MOVE_NO_CHASE"),
+            self.alert("BULLUSDT", state="BULL_CONTINUATION"),
             now=self.now + timedelta(minutes=2),
             cfg=self.cfg,
         )
-        self.assertEqual(ignored["reason"], "NOT_EARLY_PULSE")
+        self.assertTrue(bull["opened"])
 
-        second = open_paper_position(
+        ignored = open_paper_position(
             self.data_dir,
-            self.alert("SECONDUSDT"),
+            self.alert("NOCHASEUSDT", state="RAPID_MOVE_NO_CHASE"),
             now=self.now + timedelta(minutes=3),
             cfg=self.cfg,
         )
-        self.assertTrue(second["opened"])
+        self.assertEqual(ignored["reason"], "NOT_ENTRY_SIGNAL")
+
         full = open_paper_position(
             self.data_dir,
             self.alert("THIRDUSDT"),
@@ -90,11 +91,12 @@ class PaperPortfolioTests(unittest.TestCase):
             "open_positions"
         ][0]
         self.assertTrue(position["trail_active"])
-        self.assertAlmostEqual(position["stop_price"], 100.0)
+        self.assertAlmostEqual(position["stop_price"], 102.0)
+        self.assertAlmostEqual(position["profit_floor_return"], 0.02)
 
         closed = update_paper_portfolio(
             self.data_dir,
-            [{"symbol": "TESTUSDT", "last_price": 99.0}],
+            [{"symbol": "TESTUSDT", "last_price": 101.0}],
             now=self.now + timedelta(hours=1, minutes=5),
             atr_provider=lambda _symbol: self.fail("same hourly candle was fetched twice"),
             cfg=self.cfg,
@@ -103,6 +105,34 @@ class PaperPortfolioTests(unittest.TestCase):
         payload = paper_portfolio_payload(self.data_dir, cfg=self.cfg)
         self.assertEqual(payload["open_count"], 0)
         self.assertEqual(payload["available_slots"], 2)
+
+    def test_profit_floor_ratchets_while_runner_stays_open_after_24_hours(self):
+        open_paper_position(self.data_dir, self.alert(), now=self.now, cfg=self.cfg)
+        update_paper_portfolio(
+            self.data_dir,
+            [{"symbol": "TESTUSDT", "last_price": 121.0}],
+            now=self.now + timedelta(hours=2),
+            atr_provider=lambda _symbol: (10.0, "2026-08-17T13:00:00+00:00"),
+            bull_mode=True,
+            cfg=self.cfg,
+        )
+        position = paper_portfolio_payload(self.data_dir, cfg=self.cfg)[
+            "open_positions"
+        ][0]
+        self.assertAlmostEqual(position["profit_floor_return"], 0.12)
+        self.assertAlmostEqual(position["stop_price"], 112.0)
+
+        closed = update_paper_portfolio(
+            self.data_dir,
+            [{"symbol": "TESTUSDT", "last_price": 120.0}],
+            now=self.now + timedelta(hours=24),
+            cfg=self.cfg,
+        )
+        self.assertEqual(closed, [])
+        self.assertEqual(
+            paper_portfolio_payload(self.data_dir, cfg=self.cfg)["open_count"],
+            1,
+        )
 
     def test_trailing_stop_never_moves_down(self):
         open_paper_position(self.data_dir, self.alert(), now=self.now, cfg=self.cfg)
@@ -146,16 +176,26 @@ class PaperPortfolioTests(unittest.TestCase):
         )
         self.assertEqual(closed[0]["exit_reason"], "TRAIL")
 
-    def test_closes_stale_position_after_24_hours(self):
+    def test_closes_stale_position_after_12_hours(self):
         open_paper_position(self.data_dir, self.alert(), now=self.now, cfg=self.cfg)
         closed = update_paper_portfolio(
             self.data_dir,
             [{"symbol": "TESTUSDT", "last_price": 101.0}],
-            now=self.now + timedelta(hours=24),
+            now=self.now + timedelta(hours=12),
             cfg=self.cfg,
         )
-        self.assertEqual(closed[0]["exit_reason"], "TIME_24H")
+        self.assertEqual(closed[0]["exit_reason"], "STALE_12H")
         self.assertGreater(closed[0]["return"], 0.0)
+
+    def test_closes_non_moving_loser_after_six_hours(self):
+        open_paper_position(self.data_dir, self.alert(), now=self.now, cfg=self.cfg)
+        closed = update_paper_portfolio(
+            self.data_dir,
+            [{"symbol": "TESTUSDT", "last_price": 99.0}],
+            now=self.now + timedelta(hours=6),
+            cfg=self.cfg,
+        )
+        self.assertEqual(closed[0]["exit_reason"], "STALE_LOSER")
 
 
 if __name__ == "__main__":

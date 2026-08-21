@@ -63,6 +63,65 @@ class PulseTests(unittest.TestCase):
         )
         self.assertEqual(rows[0]["state"], "RAPID_MOVE_NO_CHASE")
 
+    def test_extended_move_becomes_controlled_continuation_in_bull_mode(self):
+        rows = evaluate_pulses(
+            [
+                {
+                    "symbol": "COWUSDT",
+                    "last_price": 1.055,
+                    "return_24h": 0.36,
+                    "quote_volume_24h": 250_000.0,
+                }
+            ],
+            self.history,
+            now=self.now,
+            bull_mode=True,
+        )
+        self.assertEqual(rows[0]["state"], "BULL_CONTINUATION")
+
+    def test_parabolic_five_minute_move_stays_no_chase_in_bull_mode(self):
+        rows = evaluate_pulses(
+            [
+                {
+                    "symbol": "COWUSDT",
+                    "last_price": 1.10,
+                    "return_24h": 0.36,
+                    "quote_volume_24h": 300_000.0,
+                }
+            ],
+            self.history,
+            now=self.now,
+            bull_mode=True,
+        )
+        self.assertEqual(rows[0]["state"], "RAPID_MOVE_NO_CHASE")
+
+    def test_bull_mode_ranks_strongest_eligible_momentum_first(self):
+        history = {
+            symbol: [dict(sample) for sample in self.history["COWUSDT"]]
+            for symbol in ("EARLYUSDT", "BULLUSDT")
+        }
+        rows = evaluate_pulses(
+            [
+                {
+                    "symbol": "EARLYUSDT",
+                    "last_price": 1.04,
+                    "return_24h": 0.10,
+                    "quote_volume_24h": 250_000.0,
+                },
+                {
+                    "symbol": "BULLUSDT",
+                    "last_price": 1.07,
+                    "return_24h": 0.30,
+                    "quote_volume_24h": 300_000.0,
+                },
+            ],
+            history,
+            now=self.now,
+            bull_mode=True,
+        )
+        self.assertEqual(rows[0]["symbol"], "BULLUSDT")
+        self.assertEqual(rows[0]["state"], "BULL_CONTINUATION")
+
     def test_price_move_without_new_volume_is_ignored(self):
         rows = evaluate_pulses(
             [

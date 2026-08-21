@@ -17,6 +17,9 @@ class PulseConfig:
     min_quote_delta_5m: float = 75_000.0
     min_volume_acceleration: float = 3.0
     max_early_return_24h: float = 0.20
+    max_bull_continuation_return_24h: float = 0.40
+    max_bull_continuation_return_5m: float = 0.08
+    max_bull_continuation_return_15m: float = 0.18
     max_research_return_24h: float = 0.45
     ttl_minutes: int = 120
 
@@ -59,6 +62,7 @@ def evaluate_pulses(
     *,
     now: datetime,
     cfg: PulseConfig = DEFAULT_PULSE_CONFIG,
+    bull_mode: bool = False,
 ) -> list[dict]:
     """Find fast price/volume wakeups without pre-filtering by 24h liquidity."""
     candidates: list[dict] = []
@@ -102,11 +106,20 @@ def evaluate_pulses(
         if not fast_price or not volume_surge or return_24h > cfg.max_research_return_24h:
             continue
 
-        state = (
-            "EARLY_PULSE"
-            if return_24h <= cfg.max_early_return_24h
-            else "RAPID_MOVE_NO_CHASE"
-        )
+        if return_24h <= cfg.max_early_return_24h:
+            state = "EARLY_PULSE"
+        elif (
+            bull_mode
+            and return_24h <= cfg.max_bull_continuation_return_24h
+            and return_5m <= cfg.max_bull_continuation_return_5m
+            and (
+                return_15m is None
+                or return_15m <= cfg.max_bull_continuation_return_15m
+            )
+        ):
+            state = "BULL_CONTINUATION"
+        else:
+            state = "RAPID_MOVE_NO_CHASE"
         candidates.append(
             {
                 "symbol": symbol,
@@ -118,11 +131,17 @@ def evaluate_pulses(
                 "return_15m": return_15m,
                 "quote_volume_delta_5m": quote_delta_5m,
                 "volume_acceleration": volume_acceleration,
+                "bull_mode": bull_mode,
             }
         )
+    priority = {
+        "EARLY_PULSE": 0,
+        "BULL_CONTINUATION": 0 if bull_mode else 1,
+        "RAPID_MOVE_NO_CHASE": 2,
+    }
     return sorted(
         candidates,
-        key=lambda row: (row["state"] != "EARLY_PULSE", -row["return_5m"]),
+        key=lambda row: (priority.get(row["state"], 9), -row["return_5m"]),
     )
 
 
@@ -187,11 +206,12 @@ def format_pulse_alert(row: dict) -> str:
     acceleration_text = "new baseline" if acceleration is None else f"{acceleration:.1f}x"
     return_15m = row.get("return_15m")
     return_15m_text = f"{100 * return_15m:.1f}%" if return_15m is not None else "warming up"
-    action = (
-        "Early wakeup — start order-book research; discovery only, no order"
-        if row["state"] == "EARLY_PULSE"
-        else "Rapid move already extended — order-book research only, NO CHASE"
-    )
+    if row["state"] == "EARLY_PULSE":
+        action = "Early wakeup — Wave Rider paper entry"
+    elif row["state"] == "BULL_CONTINUATION":
+        action = "Bull-regime continuation — controlled Wave Rider paper entry"
+    else:
+        action = "Rapid move too extended — order-book research only, NO CHASE"
     return (
         f"MTE CRYPTO — {row['state']}\n"
         f"{row['symbol']} @ {row['price']:.8g}\n"

@@ -25,6 +25,7 @@ async def collect(
     *,
     duration_seconds: float | None = None,
     sample_interval_seconds: float = 1.0,
+    symbol_sample_intervals: dict[str, float] | None = None,
 ) -> None:
     """Record top-20 books plus executed taker flow; never places orders."""
     streams = "/".join(
@@ -54,7 +55,15 @@ async def collect(
                     tape[symbol].append((now_ns, signed_quote, quote))
                     continue
 
-                if now_ns - last_written_ns[symbol] < sample_interval_seconds * 1_000_000_000:
+                interval = max(
+                    0.25,
+                    float(
+                        (symbol_sample_intervals or {}).get(
+                            symbol, sample_interval_seconds
+                        )
+                    ),
+                )
+                if now_ns - last_written_ns[symbol] < interval * 1_000_000_000:
                     continue
                 last_written_ns[symbol] = now_ns
 
@@ -73,6 +82,7 @@ async def collect(
                 record = {
                     "received_time_ns": now_ns,
                     "symbol": symbol,
+                    "sample_interval_seconds": interval,
                     "last_update_id": data.get("lastUpdateId"),
                     **features,
                 }

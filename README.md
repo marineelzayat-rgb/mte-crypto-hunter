@@ -86,21 +86,30 @@ causal discovery layers:
 
 1. every hour, scans the top 120 liquid Binance Spot USDT altcoins and applies
    the exact causal `PRE_IGNITION_HUNT` gate plus frozen RF ranker;
-2. every five minutes, takes a lightweight price/volume pulse of every eligible
+2. every two minutes, takes a lightweight price/volume pulse of every eligible
    Spot/USDT market, including cold markets below the top-120 liquidity cutoff;
-3. labels a pulse `EARLY_PULSE` while its 24h return is at most 20%, or
-   `RAPID_MOVE_NO_CHASE` once it is already extended;
+3. labels a pulse `EARLY_PULSE` while its 24h return is at most 20%. During a
+   broad BTC breakout regime, a non-parabolic 20–40% move becomes the separate
+   `BULL_CONTINUATION` paper-entry state; faster/older extensions remain
+   `RAPID_MOVE_NO_CHASE`;
 4. keeps each `HUNTER_ALERT` active for 48 hours and each pulse candidate active
    for two hours;
-5. records top-20 order-book and executed taker-flow snapshots once per second
-   for both hunter and pulse candidates;
+5. records derived top-20 order-book and executed taker-flow snapshots for all
+   open paper positions plus active hunter/pulse candidates. It samples every
+   second for the first 30 minutes, every 5 seconds through two hours, and every
+   15 seconds afterward so the full trade is covered without wasteful storage;
 6. writes scans, pulse history, and compressed JSONL research data under `/data`.
 7. exposes a read-only live ledger at `/status` and `/status.json` after a
    Railway public domain is generated for the service.
-8. paper-trades each new `EARLY_PULSE` in one of 16 isolated slots that start
-   with $6.25 each. The research-only Wave Rider uses a 7.5% initial stop,
-   activates after +5%, then raises an hourly Chandelier stop at 2.5 ATR. It
-   has no fixed profit target and closes any remaining position after 24 hours.
+8. paper-trades `EARLY_PULSE` and controlled `BULL_CONTINUATION` candidates in
+   one of 16 isolated slots that start with $6.25 each. The research-only Wave
+   Rider uses a 7.5% initial stop, locks progressively larger profit floors at
+   +5/+10/+20/+35/+50%, and follows the peak with a wide hourly Chandelier
+   stop (3.5 ATR normally, 4.5 ATR during a broad bull breakout). Unactivated
+   losers are recycled after six hours, other unactivated trades after 12
+   hours, while an activated runner may continue for seven days. Active
+   candidates are retried when a slot becomes free instead of being lost at
+   their first `NO_FREE_SLOT` event;
 9. mirrors every accepted paper entry and exit in a separate USD-M Futures 2x
    shadow ledger. It enters at the futures ask, exits at the bid, and records
    spread, mark/index basis, estimated taker fees, and observed funding.
@@ -109,11 +118,11 @@ Recommended Railway volume mount: `/data`. Optional environment variables:
 
 - `MTE_SCAN_TOP` (default `120`)
 - `MTE_SCAN_INTERVAL_SECONDS` (default `3600`)
-- `MTE_PULSE_INTERVAL_SECONDS` (default `300`)
+- `MTE_PULSE_INTERVAL_SECONDS` (default `120`)
 - `MTE_PULSE_TTL_MINUTES` (default `120`)
 - `MTE_CANDIDATE_TTL_HOURS` (default `48`)
 - `MTE_BOOK_SAMPLE_SECONDS` (default `1`)
-- `MTE_MAX_BOOK_SYMBOLS` (default `10`)
+- `MTE_MAX_BOOK_SYMBOLS` (default `32`, never below the 16 paper slots)
 - `MTE_TELEGRAM_BOT_TOKEN` and `MTE_TELEGRAM_CHAT_ID` for alerts
 
 No Binance API key is used or needed. There is no order-placement code.
