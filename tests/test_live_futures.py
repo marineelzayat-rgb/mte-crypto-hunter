@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -65,7 +66,9 @@ class FakeClient:
         }
 
     def balances(self):
-        return [{"asset": "USDT", "availableBalance": "100.00"}]
+        return [
+            {"asset": "USDT", "balance": "100.00", "availableBalance": "100.00"}
+        ]
 
     def exchange_info(self, symbol):
         return {
@@ -209,7 +212,7 @@ class LiveFuturesTests(unittest.TestCase):
         )
         self.assertEqual(result["reason"], "SAFE_DISABLED")
 
-    def test_armed_entry_uses_isolated_2x_and_exchange_algo_stop(self):
+    def test_armed_entry_uses_isolated_4x_compounding_and_exchange_algo_stop(self):
         client = FakeClient()
         result = open_live_futures_position(
             self.data_dir,
@@ -221,13 +224,97 @@ class LiveFuturesTests(unittest.TestCase):
         )
         self.assertTrue(result["opened"])
         self.assertEqual(client.margin_changes, [("TESTUSDT", "ISOLATED")])
-        self.assertEqual(client.leverage_changes, [("TESTUSDT", 2)])
+        self.assertEqual(client.leverage_changes, [("TESTUSDT", 4)])
         self.assertEqual(client.orders[0]["side"], "BUY")
-        self.assertEqual(client.orders[0]["quantity"], "2.2")
+        self.assertEqual(client.orders[0]["quantity"], "4.4")
+        self.assertEqual(result["entry_margin"], 11.0)
+        self.assertEqual(result["wallet_balance_at_entry"], 100.0)
+        self.assertEqual(result["daily_loss_limit_at_entry"], 30.0)
         self.assertEqual(client.algo_orders[0]["type"], "STOP_MARKET")
         self.assertEqual(client.algo_orders[0]["triggerPrice"], "9.25")
         self.assertEqual(client.algo_orders[0]["workingType"], "MARK_PRICE")
         self.assertEqual(client.algo_orders[0]["reduceOnly"], "true")
+
+    def test_compounding_margin_tracks_realized_wallet_balance(self):
+        class GrownClient(FakeClient):
+            def balances(self):
+                return [
+                    {
+                        "asset": "USDT",
+                        "balance": "150.00",
+                        "availableBalance": "150.00",
+                    }
+                ]
+
+            def new_order(self, **params):
+                self.orders.append(params)
+                if params["side"] == "BUY":
+                    return {
+                        "orderId": 10,
+                        "executedQty": params["quantity"],
+                        "avgPrice": "10.00",
+                        "cumQuote": "66.00",
+                    }
+                return super().new_order(**params)
+
+        client = GrownClient()
+        result = open_live_futures_position(
+            self.data_dir,
+            self._paper_open(),
+            self.snapshot,
+            now=self.now,
+            cfg=self._armed(),
+            client=client,
+        )
+        self.assertTrue(result["opened"])
+        self.assertEqual(result["entry_margin"], 16.5)
+        self.assertEqual(result["daily_loss_limit_at_entry"], 45.0)
+        self.assertEqual(client.orders[0]["quantity"], "6.6")
+
+    def test_equity_floor_blocks_new_entries(self):
+        class DepletedClient(FakeClient):
+            def balances(self):
+                return [
+                    {
+                        "asset": "USDT",
+                        "balance": "10.00",
+                        "availableBalance": "10.00",
+                    }
+                ]
+
+        client = DepletedClient()
+        result = open_live_futures_position(
+            self.data_dir,
+            self._paper_open(),
+            self.snapshot,
+            now=self.now,
+            cfg=self._armed(),
+            client=client,
+        )
+        self.assertEqual(result["reason"], "EXPERIMENT_EQUITY_FLOOR")
+        self.assertEqual(client.orders, [])
+
+    def test_daily_loss_gate_blocks_after_thirty_percent_realized_loss(self):
+        state = {
+            "version": 1,
+            "positions": {},
+            "closed_trades": [
+                {"closed_at": self.now.isoformat(), "pnl": -30.0}
+            ],
+            "events": [],
+        }
+        (self.data_dir / "live_futures.json").write_text(json.dumps(state))
+        client = FakeClient()
+        result = open_live_futures_position(
+            self.data_dir,
+            self._paper_open(),
+            self.snapshot,
+            now=self.now,
+            cfg=self._armed(),
+            client=client,
+        )
+        self.assertEqual(result["reason"], "DAILY_LOSS_KILL_SWITCH")
+        self.assertEqual(client.orders, [])
 
     def test_hedge_mode_is_rejected_before_any_order(self):
         client = FakeClient(hedge_mode=True)

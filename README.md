@@ -118,10 +118,11 @@ causal discovery layers:
     gates before it can submit an order. A newly filled buy must receive an
     exchange-side 7.5% hard stop immediately or the position is flattened.
 11. includes a separate optional RSA-authenticated Binance USD-M Futures layer.
-    It opens one-way, isolated 2x longs only, uses $11 margin per position by
-    default, and sends the hard stop to Binance's conditional-algo service
-    immediately. Failure to attach that stop triggers an emergency reduce-only
-    market close. It is independently `SAFE_DISABLED` by default.
+    It opens one-way, isolated 4x longs only and compounds realized equity by
+    allocating 11% of the current USDT wallet balance per position. It sends the
+    hard stop to Binance's conditional-algo service immediately. Failure to
+    attach that stop triggers an emergency reduce-only market close. It is
+    independently `SAFE_DISABLED` by default.
 
 Recommended Railway volume mount: `/data`. Optional environment variables:
 
@@ -156,15 +157,20 @@ until the read-only connection check has passed):
 - `MTE_LIVE_FUTURES_CONFIRMATION` (must exactly equal the separately
   documented arming phrase)
 - `MTE_LIVE_FUTURES_MAX_POSITIONS` (default `8`)
-- `MTE_LIVE_FUTURES_MARGIN_USDT` (default `11`, producing about $22 notional
-  at fixed 2x leverage)
-- `MTE_LIVE_FUTURES_RESERVE_USDT` (default `12`)
-- `MTE_LIVE_FUTURES_DAILY_LOSS_LIMIT_USDT` (default `8`)
+- `MTE_LIVE_FUTURES_MARGIN_FRACTION` (default `0.11`, or 11% of realized USDT
+  wallet balance per entry)
+- `MTE_LIVE_FUTURES_RESERVE_FRACTION` (default `0.10`)
+- `MTE_LIVE_FUTURES_MINIMUM_WALLET_BALANCE_USDT` (default `10`; no new entries
+  at or below this experiment floor)
+- `MTE_LIVE_FUTURES_DAILY_LOSS_LIMIT_USDT` (default minimum `30`)
+- `MTE_LIVE_FUTURES_DAILY_LOSS_LIMIT_FRACTION` (default `0.30`; the effective
+  daily gate is the larger of this fraction of wallet balance or the USDT
+  minimum)
 - `MTE_LIVE_FUTURES_INITIAL_STOP_PCT` (default `0.075`)
 
 The real Futures layer rejects hedge mode and multi-assets margin mode. It
 requires USD-M one-way mode, uses isolated margin, and always requests exactly
-2x leverage. If both real Spot and real Futures entry gates are armed, new real
+4x leverage. If both real Spot and real Futures entry gates are armed, new real
 entries go to Futures only so the same signal is not bought twice. Existing
 positions in either layer continue to be reconciled even after new entries are
 disabled.

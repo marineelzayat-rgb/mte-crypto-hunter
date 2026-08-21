@@ -23,7 +23,7 @@ from .live_spot import BinanceApiError
 UTC = timezone.utc
 STATE_FILENAME = "live_futures.json"
 STATUS_FILENAME = "live_futures_connection.json"
-LIVE_CONFIRMATION = "ENABLE_MTE_REAL_FUTURES_2X"
+LIVE_CONFIRMATION = "ENABLE_MTE_REAL_FUTURES_4X_COMPOUNDING"
 
 
 class BinanceFuturesPrivateClient:
@@ -215,10 +215,12 @@ class LiveFuturesConfig:
     enabled: bool = False
     confirmation: str = ""
     max_positions: int = 8
-    margin_usdt: float = 11.0
-    reserve_usdt: float = 12.0
-    daily_loss_limit_usdt: float = 8.0
-    leverage: int = 2
+    margin_fraction: float = 0.11
+    reserve_fraction: float = 0.10
+    minimum_wallet_balance_usdt: float = 10.0
+    daily_loss_limit_usdt: float = 30.0
+    daily_loss_limit_fraction: float = 0.30
+    leverage: int = 4
     initial_stop_pct: float = 0.075
     taker_fee_rate: float = 0.0005
 
@@ -235,19 +237,50 @@ class LiveFuturesConfig:
             max_positions=max(
                 1, min(16, int(os.environ.get("MTE_LIVE_FUTURES_MAX_POSITIONS", "8")))
             ),
-            margin_usdt=max(
-                5.0, float(os.environ.get("MTE_LIVE_FUTURES_MARGIN_USDT", "11"))
+            margin_fraction=min(
+                0.25,
+                max(
+                    0.01,
+                    float(
+                        os.environ.get("MTE_LIVE_FUTURES_MARGIN_FRACTION", "0.11")
+                    ),
+                ),
             ),
-            reserve_usdt=max(
-                0.0, float(os.environ.get("MTE_LIVE_FUTURES_RESERVE_USDT", "12"))
+            reserve_fraction=min(
+                0.50,
+                max(
+                    0.0,
+                    float(
+                        os.environ.get("MTE_LIVE_FUTURES_RESERVE_FRACTION", "0.10")
+                    ),
+                ),
+            ),
+            minimum_wallet_balance_usdt=max(
+                0.0,
+                float(
+                    os.environ.get(
+                        "MTE_LIVE_FUTURES_MINIMUM_WALLET_BALANCE_USDT", "10"
+                    )
+                ),
             ),
             daily_loss_limit_usdt=max(
                 1.0,
                 float(
-                    os.environ.get("MTE_LIVE_FUTURES_DAILY_LOSS_LIMIT_USDT", "8")
+                    os.environ.get("MTE_LIVE_FUTURES_DAILY_LOSS_LIMIT_USDT", "30")
                 ),
             ),
-            leverage=2,
+            daily_loss_limit_fraction=min(
+                0.50,
+                max(
+                    0.01,
+                    float(
+                        os.environ.get(
+                            "MTE_LIVE_FUTURES_DAILY_LOSS_LIMIT_FRACTION", "0.30"
+                        )
+                    ),
+                ),
+            ),
+            leverage=4,
             initial_stop_pct=min(
                 0.20,
                 max(
@@ -293,7 +326,7 @@ def _append(items: list, item: dict, limit: int = 500) -> None:
 def _new_state(now: datetime, cfg: LiveFuturesConfig) -> dict:
     return {
         "version": 1,
-        "mode": "LIVE_FUTURES_2X_ARMED" if cfg.armed else "SAFE_DISABLED",
+        "mode": "LIVE_FUTURES_4X_COMPOUNDING_ARMED" if cfg.armed else "SAFE_DISABLED",
         "created_at": _timestamp(now),
         "updated_at": _timestamp(now),
         "config": {
@@ -313,7 +346,7 @@ def ensure_live_futures_state(
     if not state.get("version"):
         state = _new_state(now, cfg)
     if cfg.armed:
-        state["mode"] = "LIVE_FUTURES_2X_ARMED"
+        state["mode"] = "LIVE_FUTURES_4X_COMPOUNDING_ARMED"
     elif state.get("positions"):
         state["mode"] = "MANAGE_ONLY"
     else:
@@ -328,6 +361,15 @@ def _usdt_available(balances: list[dict]) -> float:
     for balance in balances:
         if balance.get("asset") == "USDT":
             return _safe_number(balance.get("availableBalance"))
+    return 0.0
+
+
+def _usdt_wallet_balance(balances: list[dict]) -> float:
+    for balance in balances:
+        if balance.get("asset") == "USDT":
+            return _safe_number(
+                balance.get("balance") or balance.get("walletBalance")
+            )
     return 0.0
 
 
@@ -351,7 +393,7 @@ def refresh_futures_connection_status(
         "private_key_present": key_present,
         "live_enabled": cfg.enabled,
         "live_armed": cfg.armed,
-        "mode": "LIVE_FUTURES_2X_ARMED" if cfg.armed else "SAFE_DISABLED",
+        "mode": "LIVE_FUTURES_4X_COMPOUNDING_ARMED" if cfg.armed else "SAFE_DISABLED",
         "leverage": cfg.leverage,
     }
     if not api_present or not key_present:
@@ -508,7 +550,7 @@ def open_live_futures_position(
     cfg: LiveFuturesConfig,
     client: BinanceFuturesPrivateClient,
 ) -> dict:
-    """Open a 2x isolated long and immediately attach an exchange hard stop."""
+    """Open a 4x isolated long sized from realized wallet equity."""
     state = ensure_live_futures_state(data_dir, now, cfg)
     symbol = str(paper_open.get("symbol") or "").upper()
     if not cfg.armed:
@@ -521,9 +563,6 @@ def open_live_futures_position(
         return {"opened": False, "reason": "DUPLICATE_SYMBOL", "symbol": symbol}
     if len(state["positions"]) >= cfg.max_positions:
         return {"opened": False, "reason": "NO_FREE_LIVE_SLOT", "symbol": symbol}
-    if _daily_realized_loss(state, now) <= -cfg.daily_loss_limit_usdt:
-        return {"opened": False, "reason": "DAILY_LOSS_KILL_SWITCH", "symbol": symbol}
-
     ask = _safe_number(snapshot.get("ask"))
     if ask <= 0:
         return {"opened": False, "reason": "INVALID_USDM_QUOTE", "symbol": symbol}
@@ -536,8 +575,20 @@ def open_live_futures_position(
         return {"opened": False, "reason": "HEDGE_MODE_UNSUPPORTED", "symbol": symbol}
     if account_config.get("multiAssetsMargin"):
         return {"opened": False, "reason": "MULTI_ASSET_MODE_UNSUPPORTED", "symbol": symbol}
-    available = _usdt_available(client.balances())
-    allocation = min(cfg.margin_usdt, max(0.0, available - cfg.reserve_usdt))
+    balances = client.balances()
+    available = _usdt_available(balances)
+    wallet_balance = _usdt_wallet_balance(balances)
+    if wallet_balance <= cfg.minimum_wallet_balance_usdt:
+        return {"opened": False, "reason": "EXPERIMENT_EQUITY_FLOOR", "symbol": symbol}
+    daily_loss_limit = max(
+        cfg.daily_loss_limit_usdt,
+        wallet_balance * cfg.daily_loss_limit_fraction,
+    )
+    if _daily_realized_loss(state, now) <= -daily_loss_limit:
+        return {"opened": False, "reason": "DAILY_LOSS_KILL_SWITCH", "symbol": symbol}
+    target_margin = wallet_balance * cfg.margin_fraction
+    reserve = wallet_balance * cfg.reserve_fraction
+    allocation = min(target_margin, max(0.0, available - reserve))
     if allocation < 5.0:
         return {"opened": False, "reason": "INSUFFICIENT_FUTURES_USDT", "symbol": symbol}
 
@@ -571,7 +622,7 @@ def open_live_futures_position(
             raise
     leverage = client.change_leverage(symbol, cfg.leverage)
     if int(leverage.get("leverage") or 0) != cfg.leverage:
-        raise BinanceApiError("Binance did not confirm 2x leverage")
+        raise BinanceApiError(f"Binance did not confirm {cfg.leverage}x leverage")
 
     entry_client_id = _client_id("B", symbol, now)
     entry = _confirmed_new_order(
@@ -606,6 +657,9 @@ def open_live_futures_position(
         "quantity_text": executed_text,
         "entry_price": entry_price,
         "entry_margin": allocation,
+        "wallet_balance_at_entry": wallet_balance,
+        "margin_fraction": cfg.margin_fraction,
+        "daily_loss_limit_at_entry": daily_loss_limit,
         "entry_notional": entry_price * executed_qty,
         "leverage": cfg.leverage,
         "margin_type": "ISOLATED",
