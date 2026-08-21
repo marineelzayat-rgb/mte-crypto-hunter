@@ -27,6 +27,7 @@ from .futures_shadow import (
     open_futures_shadow,
     update_futures_shadow,
 )
+from .market_regime import detect_bull_regime
 from .monitor import format_alert, send_telegram
 from .paper_portfolio import (
     ensure_paper_portfolio,
@@ -186,6 +187,71 @@ def update_active_candidates(
     return active, next_states, new_alerts
 
 
+def build_order_book_collection_plan(
+    data_dir: Path,
+    hunter_symbols: list[str],
+    pulse_symbols: list[str],
+    *,
+    now: datetime,
+    max_symbols: int,
+    base_sample_seconds: float,
+) -> tuple[list[str], dict[str, float]]:
+    """Prioritize every paper position and sample early signal flow most densely."""
+    observed: dict[str, datetime] = {}
+    paper_symbols: set[str] = set()
+
+    def add(symbol: str, timestamp) -> None:
+        symbol = str(symbol or "").upper()
+        if not symbol:
+            return
+        try:
+            parsed = datetime.fromisoformat(str(timestamp))
+            if not parsed.tzinfo:
+                parsed = parsed.replace(tzinfo=UTC)
+            parsed = parsed.astimezone(UTC)
+        except (TypeError, ValueError):
+            parsed = now.astimezone(UTC)
+        observed[symbol] = max(observed.get(symbol, parsed), parsed)
+
+    paper = paper_portfolio_payload(data_dir)
+    for position in paper.get("open_positions", []):
+        symbol = str(position.get("symbol") or "").upper()
+        if symbol:
+            paper_symbols.add(symbol)
+            add(symbol, position.get("opened_at"))
+
+    active_sources = (
+        (hunter_symbols, _read_json(data_dir / "active_candidates.json")),
+        (pulse_symbols, _read_json(data_dir / "pulse_candidates.json")),
+    )
+    for symbols, records in active_sources:
+        for symbol in symbols:
+            item = records.get(symbol) or {}
+            add(symbol, item.get("detected_at"))
+
+    now_utc = now.astimezone(UTC)
+    intervals: dict[str, float] = {}
+    for symbol, detected_at in observed.items():
+        age_minutes = max(0.0, (now_utc - detected_at).total_seconds() / 60.0)
+        if age_minutes <= 30:
+            interval = base_sample_seconds
+        elif age_minutes <= 120:
+            interval = base_sample_seconds * 5.0
+        else:
+            interval = base_sample_seconds * 15.0
+        intervals[symbol] = max(0.25, interval)
+
+    ordered = sorted(
+        observed,
+        key=lambda symbol: (
+            0 if symbol in paper_symbols else 1,
+            intervals[symbol],
+            symbol,
+        ),
+    )[:max_symbols]
+    return ordered, {symbol: intervals[symbol] for symbol in ordered}
+
+
 def run_scan(data_dir: Path, top: int, ttl_hours: int) -> list[str]:
     now = _utc_now()
     frame = scan_market(replace(DEFAULT_CONFIG, max_universe=top))
@@ -221,6 +287,22 @@ def run_pulse(
     now = _utc_now()
     client = BinancePublicClient(DEFAULT_CONFIG.api_base)
     markets = spot_usdt_tickers(client)
+    regime = {
+        "active": False,
+        "state": "NORMAL",
+        "observed_at": now.isoformat(),
+        "reason": "BTC_REGIME_DATA_UNAVAILABLE",
+    }
+    try:
+        btc_daily = client.klines("BTCUSDT", "1d", limit=30, closed_only=False)
+        regime = detect_bull_regime(markets, btc_daily, now=now)
+    except Exception as exc:
+        print(
+            f"Bull regime detection failed: {type(exc).__name__}: {exc}",
+            flush=True,
+        )
+    bull_mode = bool(regime.get("active"))
+    _write_json(data_dir / "market_regime.json", regime)
     futures_snapshots: dict[str, dict] = {}
     try:
         futures_snapshots = usd_m_futures_snapshots(BinanceFuturesPublicClient())
@@ -232,7 +314,13 @@ def run_pulse(
     history_path = data_dir / "pulse_history.json"
     active_path = data_dir / "pulse_candidates.json"
     history = _read_json(history_path)
-    rows = evaluate_pulses(markets, history, now=now, cfg=cfg)
+    rows = evaluate_pulses(
+        markets,
+        history,
+        now=now,
+        cfg=cfg,
+        bull_mode=bull_mode,
+    )
     next_history = append_history(
         markets,
         history,
@@ -250,19 +338,13 @@ def run_pulse(
     _write_json(active_path, active)
     _write_json(
         data_dir / "latest_pulse.json",
-        {"observed_at": now.isoformat(), "candidates": rows},
+        {"observed_at": now.isoformat(), "market_regime": regime, "candidates": rows},
     )
     muted = muted_alert_symbols or set()
+    new_records: dict[str, dict] = {}
     for row in new_alerts:
         record = record_alert(data_dir, row, source="pulse", observed_at=now)
-        spot_open = open_paper_position(data_dir, record, now=now)
-        if spot_open.get("opened"):
-            open_futures_shadow(
-                data_dir,
-                spot_open,
-                futures_snapshots.get(str(record.get("symbol") or "")),
-                now=now,
-            )
+        new_records[str(row["symbol"])] = record
         if row["symbol"] in muted:
             continue
         message = format_pulse_alert(row)
@@ -291,6 +373,7 @@ def run_pulse(
         markets,
         now=now,
         atr_provider=hourly_atr,
+        bull_mode=bull_mode,
     )
     futures_closed = update_futures_shadow(
         data_dir,
@@ -305,7 +388,47 @@ def run_pulse(
         now=now,
     )
 
-    priority = {"EARLY_PULSE": 0, "RAPID_MOVE_NO_CHASE": 1}
+    # Reconsider every still-valid entry candidate after stale positions and
+    # stops have freed slots. This prevents a five-minute signal from being
+    # permanently lost merely because all slots were occupied on its first tick.
+    paper = paper_portfolio_payload(data_dir)
+    open_symbols = {
+        str(position.get("symbol") or "")
+        for position in paper.get("open_positions", [])
+    }
+    available = int(paper.get("available_slots") or 0)
+    for row in rows:
+        if available <= 0:
+            break
+        symbol = str(row.get("symbol") or "")
+        if row.get("state") not in {"EARLY_PULSE", "BULL_CONTINUATION"}:
+            continue
+        if not symbol or symbol in open_symbols:
+            continue
+        record = new_records.get(symbol) or {
+            **row,
+            "id": (
+                f"{(active.get(symbol) or {}).get('detected_at', now.isoformat())}"
+                f"|{symbol}|{row.get('state')}"
+            ),
+        }
+        spot_open = open_paper_position(data_dir, record, now=now)
+        if not spot_open.get("opened"):
+            continue
+        open_futures_shadow(
+            data_dir,
+            spot_open,
+            futures_snapshots.get(symbol),
+            now=now,
+        )
+        open_symbols.add(symbol)
+        available -= 1
+
+    priority = {
+        "EARLY_PULSE": 0,
+        "BULL_CONTINUATION": 1,
+        "RAPID_MOVE_NO_CHASE": 2,
+    }
     return sorted(
         active,
         key=lambda symbol: (priority.get(active[symbol].get("state", ""), 9), symbol),
@@ -321,10 +444,10 @@ def main() -> None:
     top = int(os.getenv("MTE_SCAN_TOP", "120"))
     interval_seconds = max(300, int(os.getenv("MTE_SCAN_INTERVAL_SECONDS", "3600")))
     ttl_hours = max(1, int(os.getenv("MTE_CANDIDATE_TTL_HOURS", "48")))
-    max_book_symbols = max(1, int(os.getenv("MTE_MAX_BOOK_SYMBOLS", "10")))
+    max_book_symbols = max(16, int(os.getenv("MTE_MAX_BOOK_SYMBOLS", "32")))
     sample_seconds = max(0.25, float(os.getenv("MTE_BOOK_SAMPLE_SECONDS", "1")))
     pulse_interval_seconds = max(
-        60, int(os.getenv("MTE_PULSE_INTERVAL_SECONDS", "300"))
+        60, int(os.getenv("MTE_PULSE_INTERVAL_SECONDS", "120"))
     )
     pulse_cfg = replace(
         DEFAULT_PULSE_CONFIG,
@@ -388,7 +511,14 @@ def main() -> None:
             print(f"Pulse failed: {type(exc).__name__}: {exc}", flush=True)
             pulse_symbols = []
 
-        symbols = list(dict.fromkeys(hunter_symbols + pulse_symbols))[:max_book_symbols]
+        symbols, book_intervals = build_order_book_collection_plan(
+            data_dir,
+            hunter_symbols,
+            pulse_symbols,
+            now=_utc_now(),
+            max_symbols=max_book_symbols,
+            base_sample_seconds=sample_seconds,
+        )
         print(f"Active order-book candidates: {symbols or 'none'}", flush=True)
         until_full_scan = max(5.0, next_full_scan - time.monotonic())
         remaining = max(5.0, min(float(pulse_interval_seconds), until_full_scan))
@@ -401,6 +531,7 @@ def main() -> None:
                         output,
                         duration_seconds=remaining,
                         sample_interval_seconds=sample_seconds,
+                        symbol_sample_intervals=book_intervals,
                     )
                 )
             except Exception as exc:

@@ -19,12 +19,24 @@ class PaperPortfolioConfig:
     initial_stop_pct: float = 0.075
     activation_pct: float = 0.05
     atr_length: int = 14
-    atr_multiple: float = 2.5
-    max_hold_hours: int = 24
+    atr_multiple: float = 3.5
+    bull_atr_multiple: float = 4.5
+    stale_loss_hours: int = 6
+    max_hold_hours: int = 12
+    runner_max_hold_hours: int = 168
     fee_rate: float = 0.001
 
 
 DEFAULT_PAPER_CONFIG = PaperPortfolioConfig()
+
+
+PROFIT_FLOOR_STEPS = (
+    (0.05, 0.02),
+    (0.10, 0.05),
+    (0.20, 0.12),
+    (0.35, 0.23),
+    (0.50, 0.36),
+)
 
 
 def _read_json(path: Path) -> dict:
@@ -56,6 +68,15 @@ def _finite_positive(value) -> float:
     except (TypeError, ValueError):
         return 0.0
     return number if math.isfinite(number) and number > 0 else 0.0
+
+
+def protected_profit_return(peak_return: float) -> float | None:
+    """Return the highest earned profit floor for a sampled peak return."""
+    floor = None
+    for trigger, protected in PROFIT_FLOOR_STEPS:
+        if peak_return >= trigger:
+            floor = protected
+    return floor
 
 
 def _new_state(now: datetime, cfg: PaperPortfolioConfig) -> dict:
@@ -102,14 +123,14 @@ def open_paper_position(
     now: datetime,
     cfg: PaperPortfolioConfig = DEFAULT_PAPER_CONFIG,
 ) -> dict:
-    """Open one isolated paper slot for a new EARLY_PULSE alert."""
+    """Open one isolated paper slot for an accepted momentum alert."""
     state = ensure_paper_portfolio(data_dir, now=now, cfg=cfg)
     symbol = str(alert.get("symbol") or "")
     signal_state = str(alert.get("state") or "")
     price = _finite_positive(alert.get("price"))
     reason = None
-    if signal_state != "EARLY_PULSE":
-        reason = "NOT_EARLY_PULSE"
+    if signal_state not in {"EARLY_PULSE", "BULL_CONTINUATION"}:
+        reason = "NOT_ENTRY_SIGNAL"
     elif not symbol or not price:
         reason = "INVALID_ALERT"
     elif any(
@@ -144,6 +165,7 @@ def open_paper_position(
     position = {
         "alert_id": alert.get("id"),
         "symbol": symbol,
+        "signal_state": signal_state,
         "opened_at": _timestamp(now),
         "entry_price": price,
         "entry_allocation": allocation,
@@ -153,6 +175,7 @@ def open_paper_position(
         "highest_price": price,
         "stop_price": price * (1.0 - cfg.initial_stop_pct),
         "trail_active": False,
+        "profit_floor_return": None,
         "last_atr": None,
         "last_trail_candle_at": None,
         "updated_at": _timestamp(now),
@@ -204,9 +227,10 @@ def update_paper_portfolio(
     *,
     now: datetime,
     atr_provider: AtrProvider | None = None,
+    bull_mode: bool = False,
     cfg: PaperPortfolioConfig = DEFAULT_PAPER_CONFIG,
 ) -> list[dict]:
-    """Mark positions, raise hourly Chandelier stops, and close paper trades."""
+    """Mark positions, protect earned profit, and let activated runners continue."""
     state = ensure_paper_portfolio(data_dir, now=now, cfg=cfg)
     prices = {
         str(row.get("symbol") or ""): _finite_positive(row.get("last_price"))
@@ -225,10 +249,16 @@ def update_paper_portfolio(
         position["current_price"] = price
         position["highest_price"] = max(float(position["highest_price"]), price)
         position["updated_at"] = _timestamp(now_utc)
-        if position["highest_price"] >= entry * (1.0 + cfg.activation_pct):
+        peak_return = float(position["highest_price"]) / entry - 1.0
+        if peak_return >= cfg.activation_pct:
             position["trail_active"] = True
 
         stop = float(position["stop_price"])
+        floor_return = protected_profit_return(peak_return)
+        if position.get("trail_active") and floor_return is not None:
+            stop = max(stop, entry * (1.0 + floor_return))
+            position["stop_price"] = stop
+            position["profit_floor_return"] = floor_return
         if price <= stop:
             closed.append(
                 _close_position(
@@ -256,7 +286,10 @@ def update_paper_portfolio(
                 atr, candle_at = snapshot
                 atr = _finite_positive(atr)
                 if atr and candle_at != position.get("last_trail_candle_at"):
-                    candidate = float(position["highest_price"]) - cfg.atr_multiple * atr
+                    atr_multiple = (
+                        cfg.bull_atr_multiple if bull_mode else cfg.atr_multiple
+                    )
+                    candidate = float(position["highest_price"]) - atr_multiple * atr
                     position["stop_price"] = max(stop, candidate)
                     position["last_atr"] = atr
                     position["last_trail_candle_at"] = candle_at
@@ -274,13 +307,48 @@ def update_paper_portfolio(
                         continue
 
         opened = _parse_timestamp(position["opened_at"])
-        if now_utc - opened >= timedelta(hours=cfg.max_hold_hours):
+        age = now_utc - opened
+        if (
+            not position.get("trail_active")
+            and age >= timedelta(hours=cfg.stale_loss_hours)
+            and price <= entry
+        ):
             closed.append(
                 _close_position(
                     state,
                     slot,
                     exit_price=price,
-                    reason="TIME_24H",
+                    reason="STALE_LOSER",
+                    now=now_utc,
+                    cfg=cfg,
+                )
+            )
+            continue
+        if (
+            not position.get("trail_active")
+            and age >= timedelta(hours=cfg.max_hold_hours)
+        ):
+            closed.append(
+                _close_position(
+                    state,
+                    slot,
+                    exit_price=price,
+                    reason="STALE_12H",
+                    now=now_utc,
+                    cfg=cfg,
+                )
+            )
+            continue
+        if (
+            position.get("trail_active")
+            and age >= timedelta(hours=cfg.runner_max_hold_hours)
+        ):
+            closed.append(
+                _close_position(
+                    state,
+                    slot,
+                    exit_price=price,
+                    reason="RUNNER_7D",
                     now=now_utc,
                     cfg=cfg,
                 )

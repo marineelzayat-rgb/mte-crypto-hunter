@@ -12,10 +12,18 @@ from .futures_shadow import futures_shadow_payload
 from .paper_portfolio import paper_portfolio_payload
 
 
+def _read_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text()) if path.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
 def _full_status_payload(data_dir: Path) -> dict:
     payload = status_payload(data_dir)
     payload["paper_portfolio"] = paper_portfolio_payload(data_dir)
     payload["futures_shadow"] = futures_shadow_payload(data_dir)
+    payload["market_regime"] = _read_json(data_dir / "market_regime.json")
     return payload
 
 
@@ -70,6 +78,7 @@ def render_status_html(payload: dict) -> str:
     pulse_count = len(active.get("pulse") or {})
     paper = payload.get("paper_portfolio") or {}
     futures = payload.get("futures_shadow") or {}
+    regime = payload.get("market_regime") or {}
     position_rows = []
     for position in paper.get("open_positions", []):
         position_rows.append(
@@ -131,9 +140,10 @@ table{{border-collapse:collapse;width:100%;min-width:1250px}}th,td{{padding:10px
 <p>Discovery research only. No order placement. Times are UTC.</p>
 <div><span class="pill">Hunter active: {hunter_count}</span>
 <span class="pill">Pulse active: {pulse_count}</span>
+<span class="pill">Regime: {escape(str(regime.get('state', 'UNKNOWN')))}</span>
 <span class="pill"><a href="/status.json">JSON</a></span></div>
 <h2>Wave Rider paper portfolio</h2>
-<p>Starts at $100 · 16 isolated slots · EARLY_PULSE only · 7.5% initial stop · hourly 2.5 ATR trail after +5% · 24h maximum hold.</p>
+<p>Starts at $100 · 16 isolated slots · EARLY_PULSE plus controlled BULL_CONTINUATION · 7.5% initial stop · staged profit floors · 3.5 ATR trail (4.5 in bull mode) · activated runners may continue for 7 days.</p>
 <div class="cards">
 <div class="card"><div class="label">Paper equity</div><div class="value">{escape(_money(paper.get('equity')))}</div></div>
 <div class="card"><div class="label">Total return</div><div class="value">{_percent(paper.get('total_return'))}</div></div>
