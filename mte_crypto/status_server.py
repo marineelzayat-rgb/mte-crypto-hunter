@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 from .alert_store import status_payload
 from .futures_shadow import futures_shadow_payload
+from .live_spot import live_spot_payload
 from .paper_portfolio import paper_portfolio_payload
 
 
@@ -24,6 +25,7 @@ def _full_status_payload(data_dir: Path) -> dict:
     payload["paper_portfolio"] = paper_portfolio_payload(data_dir)
     payload["futures_shadow"] = futures_shadow_payload(data_dir)
     payload["market_regime"] = _read_json(data_dir / "market_regime.json")
+    payload["live_spot"] = live_spot_payload(data_dir)
     return payload
 
 
@@ -79,6 +81,8 @@ def render_status_html(payload: dict) -> str:
     paper = payload.get("paper_portfolio") or {}
     futures = payload.get("futures_shadow") or {}
     regime = payload.get("market_regime") or {}
+    live = payload.get("live_spot") or {}
+    live_connection = live.get("connection") or {}
     position_rows = []
     for position in paper.get("open_positions", []):
         position_rows.append(
@@ -137,10 +141,12 @@ main{{max-width:1500px;margin:auto;padding:22px}}h1{{margin:0 0 6px}}p{{color:va
 table{{border-collapse:collapse;width:100%;min-width:1250px}}th,td{{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}}th{{color:var(--muted);position:sticky;top:0;background:var(--card)}}
 .ok{{color:var(--green)}}a{{color:#8ab4ff}}</style></head>
 <body><main><h1>MTE Crypto Hunter</h1><p class="ok">Live research status · refreshes every 30 seconds</p>
-<p>Discovery research only. No order placement. Times are UTC.</p>
+<p>Paper research remains active. Real Spot is separately gated and defaults to SAFE_DISABLED. Times are UTC.</p>
 <div><span class="pill">Hunter active: {hunter_count}</span>
 <span class="pill">Pulse active: {pulse_count}</span>
 <span class="pill">Regime: {escape(str(regime.get('state', 'UNKNOWN')))}</span>
+<span class="pill">Live Spot: {escape(str(live.get('mode', 'SAFE_DISABLED')))}</span>
+<span class="pill">Binance link: {'CONNECTED' if live_connection.get('connected') else 'NOT CONNECTED'}</span>
 <span class="pill"><a href="/status.json">JSON</a></span></div>
 <h2>Wave Rider paper portfolio</h2>
 <p>Starts at $100 · 16 isolated slots · EARLY_PULSE plus controlled BULL_CONTINUATION · 7.5% initial stop · staged profit floors · 3.5 ATR trail (4.5 in bull mode) · activated runners may continue for 7 days.</p>

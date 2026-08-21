@@ -113,6 +113,10 @@ causal discovery layers:
 9. mirrors every accepted paper entry and exit in a separate USD-M Futures 2x
    shadow ledger. It enters at the futures ask, exits at the bid, and records
    spread, mark/index basis, estimated taker fees, and observed funding.
+10. includes an optional Ed25519-authenticated Binance Spot execution layer.
+    It is `SAFE_DISABLED` by default and requires two separate environment
+    gates before it can submit an order. A newly filled buy must receive an
+    exchange-side 7.5% hard stop immediately or the position is flattened.
 
 Recommended Railway volume mount: `/data`. Optional environment variables:
 
@@ -125,9 +129,28 @@ Recommended Railway volume mount: `/data`. Optional environment variables:
 - `MTE_MAX_BOOK_SYMBOLS` (default `32`, never below the 16 paper slots)
 - `MTE_TELEGRAM_BOT_TOKEN` and `MTE_TELEGRAM_CHAT_ID` for alerts
 
-No Binance API key is used or needed. There is no order-placement code.
-The public status endpoints use a strict market-field allowlist; Telegram
-credentials, environment variables, and raw order-book files are never exposed.
+Optional real-Spot variables (do not enable until read-only connection testing
+has passed):
+
+- `BINANCE_API_KEY`
+- `BINANCE_ED25519_PRIVATE_KEY_B64` (PKCS#8 PEM encoded as base64)
+- `MTE_LIVE_SPOT_ENABLED` (default `false`)
+- `MTE_LIVE_SPOT_CONFIRMATION` (must exactly equal the separately documented
+  arming phrase)
+- `MTE_LIVE_MAX_POSITIONS` (default `8`)
+- `MTE_LIVE_ORDER_USDT` (default `11`)
+- `MTE_LIVE_RESERVE_USDT` (default `12`)
+- `MTE_LIVE_DAILY_LOSS_LIMIT_USDT` (default `8`)
+
+The public status page exposes only connection/mode counts for the real account;
+it deliberately redacts the Binance balance, symbols, quantities, order IDs,
+events, API key, and private key. Real fills are reported privately by Telegram.
+
+No Binance API key is needed for scanning, paper trading, or the futures shadow.
+The optional real-Spot layer remains unable to place orders unless both live
+gates are deliberately armed. The public status endpoints use strict redaction;
+Telegram credentials, environment variables, account details, and raw
+order-book files are never exposed.
 The `$100` Wave Rider portfolio shown on the status page is simulated only;
 entry and exit fees are estimated at 0.1% per side and no real funds are used.
 The parallel `$100` Futures 2x shadow is also simulated only. It never submits
@@ -160,6 +183,7 @@ Signals and features are computed only from information available at the timesta
   H4 compression rank <= 0.20, green-volume share >= 60%, positive relative
   strength, and BTC 24h return >= -2%. It does **not** require a retest.
 - `ARMED` is an early research watch, not an entry instruction.
-- The project is paper/alert automation only; it never places an exchange
-  order or stores credentials.
+- Paper and alert automation remain the default. The optional real-Spot layer
+  reads credentials only from Railway environment variables and is disabled
+  unless both independent live gates are armed.
 - Real execution must include spread, slippage, fees, funding, and exchange-specific wick behavior.

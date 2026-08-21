@@ -28,6 +28,14 @@ from .futures_shadow import (
     update_futures_shadow,
 )
 from .market_regime import detect_bull_regime
+from .live_spot import (
+    BinanceSpotPrivateClient,
+    LiveSpotConfig,
+    close_live_positions,
+    ensure_live_state,
+    open_live_position,
+    refresh_connection_status,
+)
 from .monitor import format_alert, send_telegram
 from .paper_portfolio import (
     ensure_paper_portfolio,
@@ -153,6 +161,37 @@ def send_paper_telegram_updates(
                 flush=True,
             )
     return sent_messages
+
+
+def send_live_telegram_updates(opened: list[dict], closed: list[dict]) -> list[str]:
+    """Report real executions without exposing credentials or enabling trades."""
+    if not (
+        os.environ.get("MTE_TELEGRAM_BOT_TOKEN")
+        and os.environ.get("MTE_TELEGRAM_CHAT_ID")
+    ):
+        return []
+    messages: list[str] = []
+    for position in opened:
+        message = (
+            "MTE LIVE SPOT — BUY FILLED\n"
+            f"{position.get('symbol')} @ {_money(position.get('entry_price'))}\n"
+            f"Amount: {_money(position.get('quote_spent'))}\n"
+            f"Hard stop: {_money(position.get('hard_stop_price'))}\n"
+            "Real Binance order — protected by exchange-side stop"
+        )
+        if send_telegram(message):
+            messages.append(message)
+    for trade in closed:
+        message = (
+            "MTE LIVE SPOT — POSITION CLOSED\n"
+            f"{trade.get('symbol')} | {trade.get('exit_reason')}\n"
+            f"Exit: {_money(trade.get('exit_price'))}\n"
+            f"Realized P&L: {_money(trade.get('pnl'))}\n"
+            "Real Binance execution"
+        )
+        if send_telegram(message):
+            messages.append(message)
+    return messages
 
 
 def update_active_candidates(
@@ -397,6 +436,7 @@ def run_pulse(
         for position in paper.get("open_positions", [])
     }
     available = int(paper.get("available_slots") or 0)
+    spot_opened: list[dict] = []
     for row in rows:
         if available <= 0:
             break
@@ -415,6 +455,7 @@ def run_pulse(
         spot_open = open_paper_position(data_dir, record, now=now)
         if not spot_open.get("opened"):
             continue
+        spot_opened.append(spot_open)
         open_futures_shadow(
             data_dir,
             spot_open,
@@ -423,6 +464,44 @@ def run_pulse(
         )
         open_symbols.add(symbol)
         available -= 1
+
+    live_cfg = LiveSpotConfig.from_environment()
+    live_client = None
+    try:
+        live_client = BinanceSpotPrivateClient.from_environment()
+        refresh_connection_status(
+            data_dir,
+            now=now,
+            cfg=live_cfg,
+            client=live_client,
+        )
+    except Exception as exc:
+        print(f"Live Spot connection check failed: {type(exc).__name__}: {exc}", flush=True)
+    live_opened: list[dict] = []
+    live_closed: list[dict] = []
+    if live_client is not None:
+        try:
+            live_closed = close_live_positions(
+                data_dir,
+                spot_closed,
+                now=now,
+                cfg=live_cfg,
+                client=live_client,
+            )
+            if live_cfg.armed:
+                for spot_open in spot_opened:
+                    result = open_live_position(
+                        data_dir,
+                        spot_open,
+                        now=now,
+                        cfg=live_cfg,
+                        client=live_client,
+                    )
+                    if result.get("opened"):
+                        live_opened.append(result)
+            send_live_telegram_updates(live_opened, live_closed)
+        except Exception as exc:
+            print(f"Live Spot cycle failed: {type(exc).__name__}: {exc}", flush=True)
 
     priority = {
         "EARLY_PULSE": 0,
@@ -441,6 +520,7 @@ def main() -> None:
     bootstrap_active_alerts(data_dir)
     ensure_paper_portfolio(data_dir)
     ensure_futures_shadow(data_dir)
+    ensure_live_state(data_dir, _utc_now(), LiveSpotConfig.from_environment())
     top = int(os.getenv("MTE_SCAN_TOP", "120"))
     interval_seconds = max(300, int(os.getenv("MTE_SCAN_INTERVAL_SECONDS", "3600")))
     ttl_hours = max(1, int(os.getenv("MTE_CANDIDATE_TTL_HOURS", "48")))
