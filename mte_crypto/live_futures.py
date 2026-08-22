@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN
 import base64
 import json
@@ -18,6 +18,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 from .live_spot import BinanceApiError
+from .paper_portfolio import protected_profit_return
 
 
 UTC = timezone.utc
@@ -223,6 +224,12 @@ class LiveFuturesConfig:
     leverage: int = 4
     initial_stop_pct: float = 0.075
     taker_fee_rate: float = 0.0005
+    activation_pct: float = 0.05
+    atr_multiple: float = 3.5
+    bull_atr_multiple: float = 4.5
+    stale_loss_hours: int = 6
+    max_hold_hours: int = 12
+    runner_max_hold_hours: int = 168
 
     @property
     def armed(self) -> bool:
@@ -307,6 +314,11 @@ def _write_json(path: Path, value: dict) -> None:
 
 def _timestamp(value: datetime) -> str:
     return value.astimezone(UTC).isoformat()
+
+
+def _parse_timestamp(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    return parsed.replace(tzinfo=UTC) if not parsed.tzinfo else parsed.astimezone(UTC)
 
 
 def _safe_number(value) -> float:
@@ -550,7 +562,13 @@ def open_live_futures_position(
     cfg: LiveFuturesConfig,
     client: BinanceFuturesPrivateClient,
 ) -> dict:
-    """Open a 4x isolated long sized from realized wallet equity."""
+    """Open a 4x isolated long sized from realized wallet equity.
+
+    ``paper_open`` is retained as the argument name for API compatibility, but
+    it may now be a directly accepted live signal. Real execution must not be
+    blocked merely because the separate research portfolio has no free cash or
+    slots.
+    """
     state = ensure_live_futures_state(data_dir, now, cfg)
     symbol = str(paper_open.get("symbol") or "").upper()
     if not cfg.armed:
@@ -664,6 +682,15 @@ def open_live_futures_position(
         "leverage": cfg.leverage,
         "margin_type": "ISOLATED",
         "hard_stop_price": _safe_number(stop_text),
+        "wave_stop_price": _safe_number(stop_text),
+        "current_price": entry_price,
+        "highest_price": entry_price,
+        "trail_active": False,
+        "profit_floor_return": None,
+        "last_atr": None,
+        "last_trail_candle_at": None,
+        "signal_state": paper_open.get("signal_state") or paper_open.get("state"),
+        "exit_driver": paper_open.get("exit_driver") or "PAPER_WAVE_RIDER",
         "status": "UNPROTECTED_PENDING_STOP",
         "updated_at": _timestamp(now),
     }
@@ -729,6 +756,145 @@ def open_live_futures_position(
     return {"opened": True, **position}
 
 
+def _live_wave_rider_exit_reason(
+    position: dict,
+    snapshot: dict | None,
+    *,
+    now: datetime,
+    cfg: LiveFuturesConfig,
+    atr_provider=None,
+    bull_mode: bool = False,
+) -> str | None:
+    """Update an independently tracked live runner and return an exit reason."""
+    snapshot = snapshot or {}
+    price = _safe_number(
+        snapshot.get("mark") or snapshot.get("bid") or snapshot.get("last_price")
+    )
+    if price <= 0:
+        return None
+    entry = _safe_number(position.get("entry_price"))
+    if entry <= 0:
+        return None
+
+    highest = max(_safe_number(position.get("highest_price")) or entry, price)
+    position["current_price"] = price
+    position["highest_price"] = highest
+    position["updated_at"] = _timestamp(now)
+    peak_return = highest / entry - 1.0
+    if peak_return >= cfg.activation_pct:
+        position["trail_active"] = True
+
+    stop = max(
+        _safe_number(position.get("hard_stop_price")),
+        _safe_number(position.get("wave_stop_price")),
+    )
+    floor_return = protected_profit_return(peak_return)
+    if position.get("trail_active") and floor_return is not None:
+        stop = max(stop, entry * (1.0 + floor_return))
+        position["profit_floor_return"] = floor_return
+
+    now_utc = now.astimezone(UTC)
+    if position.get("trail_active") and atr_provider is not None:
+        expected_candle = (
+            now_utc.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+        ).isoformat()
+        atr_snapshot = (
+            atr_provider(str(position.get("symbol") or ""))
+            if position.get("last_trail_candle_at") != expected_candle
+            else None
+        )
+        if atr_snapshot is not None:
+            atr, candle_at = atr_snapshot
+            atr = _safe_number(atr)
+            if atr > 0 and candle_at != position.get("last_trail_candle_at"):
+                multiple = cfg.bull_atr_multiple if bull_mode else cfg.atr_multiple
+                stop = max(stop, highest - multiple * atr)
+                position["last_atr"] = atr
+                position["last_trail_candle_at"] = candle_at
+
+    position["wave_stop_price"] = stop
+    if price <= stop:
+        return "TRAIL" if position.get("trail_active") else "INITIAL_STOP"
+
+    opened = _parse_timestamp(str(position["opened_at"]))
+    age = now_utc - opened
+    if (
+        not position.get("trail_active")
+        and age >= timedelta(hours=cfg.stale_loss_hours)
+        and price <= entry
+    ):
+        return "STALE_LOSER"
+    if not position.get("trail_active") and age >= timedelta(hours=cfg.max_hold_hours):
+        return "STALE_12H"
+    if position.get("trail_active") and age >= timedelta(
+        hours=cfg.runner_max_hold_hours
+    ):
+        return "RUNNER_7D"
+    return None
+
+
+def _market_close_live_position(
+    state: dict,
+    symbol: str,
+    position: dict,
+    *,
+    reason: str,
+    now: datetime,
+    cfg: LiveFuturesConfig,
+    client: BinanceFuturesPrivateClient,
+    fallback_exit_price: float = 0.0,
+) -> dict | None:
+    current = _current_long_position(client, symbol)
+    quantity = _safe_number(current.get("positionAmt"))
+    if quantity <= 0:
+        return None
+    try:
+        algo_id = int(position.get("stop_algo_id") or 0) or None
+        client.cancel_algo_order(
+            algo_id=algo_id,
+            client_algo_id=None if algo_id else position.get("stop_client_algo_id"),
+        )
+    except BinanceApiError:
+        # Continue reducing risk. A surviving exchange stop is reduce-only.
+        pass
+    lot = _filter(_symbol_meta(client, symbol), "MARKET_LOT_SIZE")
+    quantity_text = _round_down(
+        quantity, lot.get("stepSize") or position.get("quantity_text") or "0.00000001"
+    )
+    exit_order = _confirmed_new_order(
+        client,
+        symbol=symbol,
+        client_order_id=_client_id("X", symbol, now),
+        side="SELL",
+        type="MARKET",
+        quantity=quantity_text,
+        reduceOnly="true",
+        newOrderRespType="RESULT",
+    )
+    executed = _safe_number(exit_order.get("executedQty")) or quantity
+    exit_price = _safe_number(exit_order.get("avgPrice"))
+    if not exit_price:
+        cum_quote = _safe_number(exit_order.get("cumQuote"))
+        exit_price = (
+            cum_quote / executed
+            if executed and cum_quote
+            else fallback_exit_price
+            or _safe_number(position.get("current_price"))
+            or _safe_number(position.get("entry_price"))
+        )
+    trade = {
+        **position,
+        "closed_at": _timestamp(now),
+        "exit_order_id": exit_order.get("orderId"),
+        "exit_price": exit_price,
+        "pnl": _estimated_pnl(position, exit_price, executed, cfg.taker_fee_rate),
+        "exit_reason": reason,
+    }
+    _append(state["closed_trades"], trade)
+    del state["positions"][symbol]
+    return trade
+
+
 def close_live_futures_positions(
     data_dir: Path,
     paper_closed: list[dict],
@@ -736,10 +902,14 @@ def close_live_futures_positions(
     now: datetime,
     cfg: LiveFuturesConfig,
     client: BinanceFuturesPrivateClient,
+    snapshots: dict[str, dict] | None = None,
+    atr_provider=None,
+    bull_mode: bool = False,
 ) -> list[dict]:
-    """Reconcile server stops and mirror the Wave Rider paper exits."""
+    """Reconcile server stops and manage live Wave Rider exits independently."""
     state = ensure_live_futures_state(data_dir, now, cfg)
     closed: list[dict] = []
+    snapshots = snapshots or {}
 
     for symbol, position in list(state["positions"].items()):
         current = _current_long_position(client, symbol)
@@ -789,6 +959,31 @@ def close_live_futures_positions(
             del state["positions"][symbol]
             continue
         if current_quantity > 0:
+            if position.get("exit_driver") == "LIVE_WAVE_RIDER":
+                reason = _live_wave_rider_exit_reason(
+                    position,
+                    snapshots.get(symbol),
+                    now=now,
+                    cfg=cfg,
+                    atr_provider=atr_provider,
+                    bull_mode=bull_mode,
+                )
+                if reason:
+                    trade = _market_close_live_position(
+                        state,
+                        symbol,
+                        position,
+                        reason=reason,
+                        now=now,
+                        cfg=cfg,
+                        client=client,
+                        fallback_exit_price=_safe_number(
+                            (snapshots.get(symbol) or {}).get("mark")
+                            or (snapshots.get(symbol) or {}).get("bid")
+                        ),
+                    )
+                    if trade:
+                        closed.append(trade)
             continue
         algo = {}
         try:
@@ -822,6 +1017,8 @@ def close_live_futures_positions(
         symbol = str(paper_trade.get("symbol") or "").upper()
         position = state["positions"].get(symbol)
         if not position:
+            continue
+        if position.get("exit_driver") == "LIVE_WAVE_RIDER":
             continue
         current = _current_long_position(client, symbol)
         quantity = _safe_number(current.get("positionAmt"))
