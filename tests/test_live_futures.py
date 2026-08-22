@@ -417,6 +417,73 @@ class LiveFuturesTests(unittest.TestCase):
         self.assertEqual(client.orders[-1]["side"], "SELL")
         self.assertEqual(client.orders[-1]["reduceOnly"], "true")
 
+    def test_direct_live_signal_does_not_depend_on_paper_portfolio_slot(self):
+        client = FakeClient()
+        signal = {
+            "opened": True,
+            "symbol": "TESTUSDT",
+            "alert_id": "live-alert-1",
+            "signal_state": "EARLY_PULSE",
+            "exit_driver": "LIVE_WAVE_RIDER",
+        }
+        result = open_live_futures_position(
+            self.data_dir,
+            signal,
+            self.snapshot,
+            now=self.now,
+            cfg=self._armed(),
+            client=client,
+        )
+        self.assertTrue(result["opened"])
+        self.assertEqual(result["exit_driver"], "LIVE_WAVE_RIDER")
+        self.assertIsNone(result["paper_slot_id"])
+
+    def test_independent_live_wave_rider_locks_profit_and_closes(self):
+        client = FakeClient()
+        signal = {
+            "opened": True,
+            "symbol": "TESTUSDT",
+            "alert_id": "live-alert-1",
+            "signal_state": "EARLY_PULSE",
+            "exit_driver": "LIVE_WAVE_RIDER",
+        }
+        cfg = self._armed()
+        open_live_futures_position(
+            self.data_dir,
+            signal,
+            self.snapshot,
+            now=self.now,
+            cfg=cfg,
+            client=client,
+        )
+
+        first = close_live_futures_positions(
+            self.data_dir,
+            [],
+            now=self.now,
+            cfg=cfg,
+            client=client,
+            snapshots={"TESTUSDT": {"mark": 10.60, "bid": 10.59}},
+        )
+        self.assertEqual(first, [])
+        state = json.loads((self.data_dir / "live_futures.json").read_text())
+        position = state["positions"]["TESTUSDT"]
+        self.assertTrue(position["trail_active"])
+        self.assertAlmostEqual(position["wave_stop_price"], 10.20)
+
+        second = close_live_futures_positions(
+            self.data_dir,
+            [],
+            now=self.now,
+            cfg=cfg,
+            client=client,
+            snapshots={"TESTUSDT": {"mark": 10.15, "bid": 10.14}},
+        )
+        self.assertEqual(len(second), 1)
+        self.assertEqual(second[0]["exit_reason"], "TRAIL")
+        self.assertEqual(client.orders[-1]["side"], "SELL")
+        self.assertEqual(client.orders[-1]["reduceOnly"], "true")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -532,13 +532,31 @@ def run_pulse(
                 now=now,
                 cfg=futures_live_cfg,
                 client=futures_live_client,
+                snapshots=futures_snapshots,
+                atr_provider=hourly_atr,
+                bull_mode=bull_mode,
             )
             if futures_live_cfg.armed:
-                for spot_open in spot_opened:
-                    symbol = str(spot_open.get("symbol") or "")
+                # Real Futures entries are driven by newly accepted alerts,
+                # independently of the separate paper portfolio's cash/slots.
+                # This also prevents replaying alerts that predate arming.
+                for symbol, record in new_records.items():
+                    if record.get("state") not in {
+                        "EARLY_PULSE",
+                        "BULL_CONTINUATION",
+                    }:
+                        continue
+                    live_signal = {
+                        "opened": True,
+                        "symbol": symbol,
+                        "alert_id": record.get("id"),
+                        "signal_state": record.get("state"),
+                        "price": record.get("price"),
+                        "exit_driver": "LIVE_WAVE_RIDER",
+                    }
                     result = open_live_futures_position(
                         data_dir,
-                        spot_open,
+                        live_signal,
                         futures_snapshots.get(symbol),
                         now=now,
                         cfg=futures_live_cfg,
