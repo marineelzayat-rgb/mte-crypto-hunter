@@ -3,11 +3,25 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from mte_crypto.daemon import build_order_book_collection_plan, update_active_candidates
+from mte_crypto.book_collector import collection_timeout_seconds
+from mte_crypto.daemon import (
+    build_order_book_collection_plan,
+    update_active_candidates,
+    watchdog_is_stale,
+)
 from mte_crypto.paper_portfolio import open_paper_position
 
 
 class ActiveCandidateTests(unittest.TestCase):
+    def test_watchdog_detects_only_expired_heartbeat(self):
+        self.assertFalse(watchdog_is_stale(100.0, 699.0, 600.0))
+        self.assertTrue(watchdog_is_stale(100.0, 701.0, 600.0))
+
+    def test_order_book_deadline_is_absolute_and_bounded(self):
+        self.assertEqual(collection_timeout_seconds(None), None)
+        self.assertAlmostEqual(collection_timeout_seconds(1.0), 1.25)
+        self.assertAlmostEqual(collection_timeout_seconds(120.0), 130.0)
+
     def test_alert_is_added_once_and_expires_after_ttl(self):
         now = datetime(2026, 8, 15, 1, tzinfo=timezone.utc)
         rows = [{"symbol": "ACEUSDT", "state": "HUNTER_ALERT", "price": 0.1}]
