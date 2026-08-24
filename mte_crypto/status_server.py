@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import shutil
 import threading
 from urllib.parse import urlparse
 
@@ -22,10 +23,35 @@ def _read_json(path: Path) -> dict:
         return {}
 
 
+def _storage_payload(data_dir: Path) -> dict:
+    entries: dict[str, int] = {}
+    total = 0
+    try:
+        for path in data_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            size = path.stat().st_size
+            total += size
+            relative = path.relative_to(data_dir)
+            top = relative.parts[0] if relative.parts else path.name
+            entries[top] = entries.get(top, 0) + size
+        usage = shutil.disk_usage(data_dir)
+        return {
+            "total_bytes": total,
+            "by_top_level_bytes": dict(
+                sorted(entries.items(), key=lambda item: item[1], reverse=True)
+            ),
+            "filesystem_free_bytes": usage.free,
+        }
+    except OSError as exc:
+        return {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+
+
 def _full_status_payload(data_dir: Path) -> dict:
     payload = status_payload(data_dir)
     runtime_dir = Path(os.getenv("MTE_RUNTIME_DIR", "/tmp/mte-runtime"))
     payload["daemon"] = _read_json(runtime_dir / "mte_daemon_heartbeat.json")
+    payload["storage"] = _storage_payload(data_dir)
     payload["paper_portfolio"] = paper_portfolio_payload(data_dir)
     payload["futures_shadow"] = futures_shadow_payload(data_dir)
     payload["market_regime"] = _read_json(data_dir / "market_regime.json")
