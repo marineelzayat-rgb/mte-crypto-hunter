@@ -106,17 +106,25 @@ class RuntimeWatchdog:
         now = _utc_now()
         with self._lock:
             self._last_beat = time.monotonic()
-        _write_json(
-            self.path,
-            {
-                "observed_at": now.isoformat(),
-                "status": "RUNNING",
-                "phase": phase,
-                "pid": os.getpid(),
-                "watchdog_timeout_seconds": self.timeout_seconds,
-                **details,
-            },
-        )
+        try:
+            _write_json(
+                self.path,
+                {
+                    "observed_at": now.isoformat(),
+                    "status": "RUNNING",
+                    "phase": phase,
+                    "pid": os.getpid(),
+                    "watchdog_timeout_seconds": self.timeout_seconds,
+                    **details,
+                },
+            )
+        except OSError as exc:
+            # Runtime health reporting must never prevent the trading daemon
+            # from binding its HTTP port or managing an existing position.
+            print(
+                f"Heartbeat write failed: {type(exc).__name__}: {exc}",
+                flush=True,
+            )
 
     def start(self) -> None:
         thread = threading.Thread(
@@ -710,6 +718,17 @@ def run_pulse(
 def main() -> None:
     data_dir = Path(os.getenv("MTE_DATA_DIR", "output/live"))
     data_dir.mkdir(parents=True, exist_ok=True)
+
+    # Bind the Railway HTTP port before touching persistent state or external
+    # services.  This keeps the deployment observable while startup recovery
+    # or a slow volume operation is in progress.
+    port = int(os.getenv("PORT", "8080"))
+    try:
+        start_status_server(data_dir, port)
+        print(f"Status server started on port {port}", flush=True)
+    except OSError as exc:
+        print(f"Status server failed: {type(exc).__name__}: {exc}", flush=True)
+
     bootstrap_active_alerts(data_dir)
     ensure_paper_portfolio(data_dir)
     ensure_futures_shadow(data_dir)
@@ -735,13 +754,6 @@ def main() -> None:
     )
     watchdog.beat("startup")
     watchdog.start()
-
-    port = int(os.getenv("PORT", "8080"))
-    try:
-        start_status_server(data_dir, port)
-        print(f"Status server started on port {port}", flush=True)
-    except OSError as exc:
-        print(f"Status server failed: {type(exc).__name__}: {exc}", flush=True)
 
     print(
         f"MTE daemon started: top={top}, scan_every={interval_seconds}s, "
