@@ -53,7 +53,7 @@ def summarize_order_book_file(path: Path) -> dict:
     summary: dict = {"version": 1, "source": path.name, "symbols": {}}
     opener = gzip.open if path.suffix == ".gz" else open
     with opener(path, "rt", encoding="utf-8") as handle:
-        for line in handle:
+        for line_number, line in enumerate(handle, start=1):
             try:
                 record = json.loads(line)
             except (json.JSONDecodeError, UnicodeDecodeError):
@@ -71,6 +71,10 @@ def summarize_order_book_file(path: Path) -> dict:
                 value = float(raw)
                 if math.isfinite(value):
                     _merge_metric(bucket["metrics"].setdefault(name, {}), value)
+            if line_number % 1000 == 0:
+                # Let the status-server thread answer Railway health requests
+                # while a large gzip is being compacted.
+                time.sleep(0.001)
     return summary
 
 

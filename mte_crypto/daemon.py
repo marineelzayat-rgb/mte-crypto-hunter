@@ -737,7 +737,12 @@ def main() -> None:
     )
     watchdog.start()
     watchdog.beat("startup_storage_reclaim")
-    compacted_books = reclaim_order_book_storage(data_dir)
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="mte-storage") as storage_executor:
+        storage_future = storage_executor.submit(reclaim_order_book_storage, data_dir)
+        while not storage_future.done():
+            watchdog.beat("startup_storage_reclaim", compaction_running=True)
+            time.sleep(2.0)
+        compacted_books = storage_future.result()
     if compacted_books:
         print(f"Compacted order-book files: {compacted_books}", flush=True)
     watchdog.beat("startup_bootstrap_alerts")
