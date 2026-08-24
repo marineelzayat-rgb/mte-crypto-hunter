@@ -729,10 +729,20 @@ def main() -> None:
     except OSError as exc:
         print(f"Status server failed: {type(exc).__name__}: {exc}", flush=True)
 
+    watchdog = RuntimeWatchdog(
+        data_dir,
+        timeout_seconds=float(os.getenv("MTE_WATCHDOG_TIMEOUT_SECONDS", "600")),
+    )
+    watchdog.beat("startup_bootstrap_alerts")
+    watchdog.start()
     bootstrap_active_alerts(data_dir)
+    watchdog.beat("startup_paper_portfolio")
     ensure_paper_portfolio(data_dir)
+    watchdog.beat("startup_futures_shadow")
     ensure_futures_shadow(data_dir)
+    watchdog.beat("startup_live_spot")
     ensure_live_state(data_dir, _utc_now(), LiveSpotConfig.from_environment())
+    watchdog.beat("startup_live_futures")
     ensure_live_futures_state(
         data_dir, _utc_now(), LiveFuturesConfig.from_environment()
     )
@@ -748,12 +758,7 @@ def main() -> None:
         DEFAULT_PULSE_CONFIG,
         ttl_minutes=max(15, int(os.getenv("MTE_PULSE_TTL_MINUTES", "120"))),
     )
-    watchdog = RuntimeWatchdog(
-        data_dir,
-        timeout_seconds=float(os.getenv("MTE_WATCHDOG_TIMEOUT_SECONDS", "600")),
-    )
     watchdog.beat("startup")
-    watchdog.start()
 
     print(
         f"MTE daemon started: top={top}, scan_every={interval_seconds}s, "
