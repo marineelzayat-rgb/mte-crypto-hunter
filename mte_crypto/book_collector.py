@@ -5,12 +5,118 @@ import asyncio
 from collections import defaultdict, deque
 import gzip
 import json
+import math
+import os
 from pathlib import Path
+import shutil
 import time
 
 import websockets
 
 from .flow import order_book_features
+
+
+ORDER_BOOK_MIN_FREE_BYTES = 128 * 1024 * 1024
+ORDER_BOOK_MAX_RAW_BYTES = 64 * 1024 * 1024
+
+
+def _merge_metric(target: dict, value: float) -> None:
+    target["count"] = int(target.get("count", 0)) + 1
+    target["sum"] = float(target.get("sum", 0.0)) + value
+    target["min"] = min(float(target.get("min", value)), value)
+    target["max"] = max(float(target.get("max", value)), value)
+    target["positive"] = int(target.get("positive", 0)) + int(value > 0)
+
+
+def _merge_book_summary(target: dict, source: dict) -> dict:
+    target.setdefault("version", 1)
+    target_symbols = target.setdefault("symbols", {})
+    for symbol, incoming in (source.get("symbols") or {}).items():
+        current = target_symbols.setdefault(symbol, {"samples": 0, "metrics": {}})
+        current["samples"] = int(current.get("samples", 0)) + int(incoming.get("samples", 0))
+        current_metrics = current.setdefault("metrics", {})
+        for name, values in (incoming.get("metrics") or {}).items():
+            metric = current_metrics.setdefault(
+                name,
+                {"count": 0, "sum": 0.0, "min": values["min"], "max": values["max"], "positive": 0},
+            )
+            metric["count"] += int(values.get("count", 0))
+            metric["sum"] += float(values.get("sum", 0.0))
+            metric["min"] = min(float(metric["min"]), float(values["min"]))
+            metric["max"] = max(float(metric["max"]), float(values["max"]))
+            metric["positive"] += int(values.get("positive", 0))
+    return target
+
+
+def summarize_order_book_file(path: Path) -> dict:
+    """Reduce raw snapshots to mergeable per-symbol distribution statistics."""
+    summary: dict = {"version": 1, "source": path.name, "symbols": {}}
+    opener = gzip.open if path.suffix == ".gz" else open
+    with opener(path, "rt", encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                record = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            symbol = str(record.get("symbol") or "")
+            if not symbol:
+                continue
+            bucket = summary["symbols"].setdefault(symbol, {"samples": 0, "metrics": {}})
+            bucket["samples"] += 1
+            for name, raw in record.items():
+                if name in {"symbol", "received_time_ns", "last_update_id"}:
+                    continue
+                if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                    continue
+                value = float(raw)
+                if math.isfinite(value):
+                    _merge_metric(bucket["metrics"].setdefault(name, {}), value)
+    return summary
+
+
+def reclaim_order_book_storage(
+    data_dir: Path,
+    *,
+    min_free_bytes: int = ORDER_BOOK_MIN_FREE_BYTES,
+    max_raw_bytes: int = ORDER_BOOK_MAX_RAW_BYTES,
+) -> list[str]:
+    """Compact raw books near capacity while retaining research distributions."""
+    raw_dir = data_dir / "order_book"
+    if not raw_dir.exists():
+        return []
+    files = sorted(raw_dir.glob("*.jsonl.gz"), key=lambda item: item.stat().st_mtime)
+    compacted: list[str] = []
+    summary_dir = data_dir / "order_book_summary"
+    runtime_dir = Path(os.getenv("MTE_RUNTIME_DIR", "/tmp/mte-runtime"))
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    for path in files:
+        try:
+            free = shutil.disk_usage(data_dir).free
+            if free >= min_free_bytes and path.stat().st_size <= max_raw_bytes:
+                continue
+            incoming = summarize_order_book_file(path)
+            summary_path = summary_dir / f"{path.name.removesuffix('.jsonl.gz')}.json"
+            existing = {}
+            try:
+                if summary_path.exists():
+                    existing = json.loads(summary_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                existing = {}
+            merged = _merge_book_summary(existing, incoming)
+            staged = runtime_dir / f"{summary_path.name}.tmp"
+            staged.write_text(json.dumps(merged, separators=(",", ":")))
+            path.unlink()
+            summary_dir.mkdir(parents=True, exist_ok=True)
+            summary_path.write_text(staged.read_text())
+            staged.unlink()
+            compacted.append(path.name)
+        except OSError as exc:
+            print(
+                f"Order-book compaction failed for {path.name}: {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            break
+    return compacted
 
 
 def collection_timeout_seconds(duration_seconds: float | None) -> float | None:
