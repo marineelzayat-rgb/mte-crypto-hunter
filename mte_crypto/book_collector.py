@@ -13,6 +13,14 @@ import websockets
 from .flow import order_book_features
 
 
+def collection_timeout_seconds(duration_seconds: float | None) -> float | None:
+    if duration_seconds is None:
+        return None
+    duration = max(0.0, float(duration_seconds))
+    grace = min(10.0, max(0.25, duration * 0.10))
+    return duration + grace
+
+
 def _open_output(output: Path):
     if output.suffix == ".gz":
         return gzip.open(output, "at", encoding="utf-8")
@@ -39,57 +47,85 @@ async def collect(
     output.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     last_flush = started
-    async with websockets.connect(url, ping_interval=20, ping_timeout=20) as socket:
-        with _open_output(output) as handle:
-            async for raw in socket:
-                if duration_seconds is not None and time.monotonic() - started >= duration_seconds:
-                    break
-                message = json.loads(raw)
-                data = message.get("data", message)
-                stream = message.get("stream", "")
-                symbol = stream.split("@", 1)[0].upper()
-                now_ns = time.time_ns()
-                if stream.endswith("@aggTrade"):
-                    quote = float(data["p"]) * float(data["q"])
-                    signed_quote = -quote if bool(data["m"]) else quote
-                    tape[symbol].append((now_ns, signed_quote, quote))
-                    continue
+    # ``async for`` only advances when Binance sends a message.  Previously the
+    # duration check lived solely inside that loop, so a silent-but-open socket
+    # could freeze the entire scanner indefinitely.  The outer timeout is an
+    # absolute deadline and therefore also covers connection/close stalls.
+    absolute_timeout = collection_timeout_seconds(duration_seconds)
+    try:
+        async with asyncio.timeout(absolute_timeout):
+            async with websockets.connect(
+                url,
+                ping_interval=20,
+                ping_timeout=20,
+                open_timeout=10,
+                close_timeout=5,
+            ) as socket:
+                with _open_output(output) as handle:
+                    async for raw in socket:
+                        if (
+                            duration_seconds is not None
+                            and time.monotonic() - started >= duration_seconds
+                        ):
+                            break
+                        message = json.loads(raw)
+                        data = message.get("data", message)
+                        stream = message.get("stream", "")
+                        symbol = stream.split("@", 1)[0].upper()
+                        now_ns = time.time_ns()
+                        if stream.endswith("@aggTrade"):
+                            quote = float(data["p"]) * float(data["q"])
+                            signed_quote = -quote if bool(data["m"]) else quote
+                            tape[symbol].append((now_ns, signed_quote, quote))
+                            continue
 
-                interval = max(
-                    0.25,
-                    float(
-                        (symbol_sample_intervals or {}).get(
-                            symbol, sample_interval_seconds
+                        interval = max(
+                            0.25,
+                            float(
+                                (symbol_sample_intervals or {}).get(
+                                    symbol, sample_interval_seconds
+                                )
+                            ),
                         )
-                    ),
-                )
-                if now_ns - last_written_ns[symbol] < interval * 1_000_000_000:
-                    continue
-                last_written_ns[symbol] = now_ns
+                        if (
+                            now_ns - last_written_ns[symbol]
+                            < interval * 1_000_000_000
+                        ):
+                            continue
+                        last_written_ns[symbol] = now_ns
 
-                cutoff = now_ns - 60_000_000_000
-                while tape[symbol] and tape[symbol][0][0] < cutoff:
-                    tape[symbol].popleft()
-                features = order_book_features(data["bids"], data["asks"])
-                for seconds in (5, 30, 60):
-                    start = now_ns - seconds * 1_000_000_000
-                    recent = [item for item in tape[symbol] if item[0] >= start]
-                    gross = sum(item[2] for item in recent)
-                    features[f"tape_delta_ratio_{seconds}s"] = (
-                        sum(item[1] for item in recent) / gross if gross else None
-                    )
-                    features[f"tape_quote_volume_{seconds}s"] = gross
-                record = {
-                    "received_time_ns": now_ns,
-                    "symbol": symbol,
-                    "sample_interval_seconds": interval,
-                    "last_update_id": data.get("lastUpdateId"),
-                    **features,
-                }
-                handle.write(json.dumps(record, separators=(",", ":")) + "\n")
-                if time.monotonic() - last_flush >= 15:
-                    handle.flush()
-                    last_flush = time.monotonic()
+                        cutoff = now_ns - 60_000_000_000
+                        while tape[symbol] and tape[symbol][0][0] < cutoff:
+                            tape[symbol].popleft()
+                        features = order_book_features(data["bids"], data["asks"])
+                        for seconds in (5, 30, 60):
+                            start = now_ns - seconds * 1_000_000_000
+                            recent = [
+                                item for item in tape[symbol] if item[0] >= start
+                            ]
+                            gross = sum(item[2] for item in recent)
+                            features[f"tape_delta_ratio_{seconds}s"] = (
+                                sum(item[1] for item in recent) / gross
+                                if gross
+                                else None
+                            )
+                            features[f"tape_quote_volume_{seconds}s"] = gross
+                        record = {
+                            "received_time_ns": now_ns,
+                            "symbol": symbol,
+                            "sample_interval_seconds": interval,
+                            "last_update_id": data.get("lastUpdateId"),
+                            **features,
+                        }
+                        handle.write(
+                            json.dumps(record, separators=(",", ":")) + "\n"
+                        )
+                        if time.monotonic() - last_flush >= 15:
+                            handle.flush()
+                            last_flush = time.monotonic()
+    except TimeoutError:
+        # Normal bounded completion when the stream did not yield in time.
+        return
 
 
 def main() -> None:

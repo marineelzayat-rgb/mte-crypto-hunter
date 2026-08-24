@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import threading
 import time
 from zoneinfo import ZoneInfo
 
@@ -66,6 +68,7 @@ from .status_server import start_status_server
 UTC = timezone.utc
 CAIRO = ZoneInfo("Africa/Cairo")
 ALERT_STATE = "HUNTER_ALERT"
+HEARTBEAT_FILENAME = "daemon_heartbeat.json"
 
 
 def _utc_now() -> datetime:
@@ -84,6 +87,71 @@ def _write_json(path: Path, value: dict | list) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, indent=2, sort_keys=True))
     temporary.replace(path)
+
+
+def watchdog_is_stale(last_beat: float, now: float, timeout_seconds: float) -> bool:
+    return now - last_beat > timeout_seconds
+
+
+class RuntimeWatchdog:
+    """Persist runtime health and force Railway to restart a stuck worker."""
+
+    def __init__(self, data_dir: Path, timeout_seconds: float = 600.0):
+        self.path = data_dir / HEARTBEAT_FILENAME
+        self.timeout_seconds = max(180.0, float(timeout_seconds))
+        self._last_beat = time.monotonic()
+        self._lock = threading.Lock()
+
+    def beat(self, phase: str, **details) -> None:
+        now = _utc_now()
+        with self._lock:
+            self._last_beat = time.monotonic()
+        _write_json(
+            self.path,
+            {
+                "observed_at": now.isoformat(),
+                "status": "RUNNING",
+                "phase": phase,
+                "pid": os.getpid(),
+                "watchdog_timeout_seconds": self.timeout_seconds,
+                **details,
+            },
+        )
+
+    def start(self) -> None:
+        thread = threading.Thread(
+            target=self._monitor,
+            name="mte-watchdog",
+            daemon=True,
+        )
+        thread.start()
+
+    def _monitor(self) -> None:
+        check_every = min(30.0, self.timeout_seconds / 4.0)
+        while True:
+            time.sleep(check_every)
+            now = time.monotonic()
+            with self._lock:
+                last_beat = self._last_beat
+            if not watchdog_is_stale(last_beat, now, self.timeout_seconds):
+                continue
+            age = now - last_beat
+            _write_json(
+                self.path,
+                {
+                    "observed_at": _utc_now().isoformat(),
+                    "status": "STALLED_RESTARTING",
+                    "phase": "watchdog",
+                    "pid": os.getpid(),
+                    "age_seconds": age,
+                    "watchdog_timeout_seconds": self.timeout_seconds,
+                },
+            )
+            print(
+                f"Runtime watchdog restarting stalled worker after {age:.1f}s",
+                flush=True,
+            )
+            os._exit(70)
 
 
 def _percent(value) -> str:
@@ -333,9 +401,14 @@ def build_order_book_collection_plan(
     return ordered, {symbol: intervals[symbol] for symbol in ordered}
 
 
-def run_scan(data_dir: Path, top: int, ttl_hours: int) -> list[str]:
-    now = _utc_now()
-    frame = scan_market(replace(DEFAULT_CONFIG, max_universe=top))
+def apply_scan_results(
+    data_dir: Path,
+    frame,
+    *,
+    now: datetime,
+    ttl_hours: int,
+) -> list[str]:
+    """Persist a completed scan in the main thread to avoid file races."""
     data_dir.mkdir(parents=True, exist_ok=True)
     frame.to_csv(data_dir / "latest_scan.csv", index=False)
     frame.to_csv(data_dir / f"scan_{now:%Y%m%d_%H%M%S}.csv", index=False)
@@ -357,6 +430,16 @@ def run_scan(data_dir: Path, top: int, ttl_hours: int) -> list[str]:
         if not send_telegram(message):
             print(message, flush=True)
     return sorted(active)
+
+
+def run_scan(data_dir: Path, top: int, ttl_hours: int) -> list[str]:
+    frame = scan_market(replace(DEFAULT_CONFIG, max_universe=top))
+    return apply_scan_results(
+        data_dir,
+        frame,
+        now=_utc_now(),
+        ttl_hours=ttl_hours,
+    )
 
 
 def run_pulse(
@@ -646,6 +729,12 @@ def main() -> None:
         DEFAULT_PULSE_CONFIG,
         ttl_minutes=max(15, int(os.getenv("MTE_PULSE_TTL_MINUTES", "120"))),
     )
+    watchdog = RuntimeWatchdog(
+        data_dir,
+        timeout_seconds=float(os.getenv("MTE_WATCHDOG_TIMEOUT_SECONDS", "600")),
+    )
+    watchdog.beat("startup")
+    watchdog.start()
 
     port = int(os.getenv("PORT", "8080"))
     try:
@@ -676,20 +765,53 @@ def main() -> None:
                 flush=True,
             )
     next_full_scan = 0.0
-    hunter_symbols: list[str] = []
+    hunter_symbols = sorted(_read_json(data_dir / "active_candidates.json"))
+    scan_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mte-scan")
+    scan_future: Future | None = None
+    scan_started_at: str | None = None
     while True:
         cycle_started = time.monotonic()
-        if cycle_started >= next_full_scan:
+        watchdog.beat(
+            "cycle_start",
+            full_scan_running=bool(scan_future and not scan_future.done()),
+        )
+
+        if scan_future is not None and scan_future.done():
             try:
-                hunter_symbols = run_scan(data_dir, top, ttl_hours)
+                frame = scan_future.result()
+                hunter_symbols = apply_scan_results(
+                    data_dir,
+                    frame,
+                    now=_utc_now(),
+                    ttl_hours=ttl_hours,
+                )
                 print(
                     f"Full scan complete; hunter candidates: {hunter_symbols or 'none'}",
                     flush=True,
                 )
             except Exception as exc:
                 print(f"Scan failed: {type(exc).__name__}: {exc}", flush=True)
-            next_full_scan = cycle_started + interval_seconds
+            finally:
+                scan_future = None
+                scan_started_at = None
 
+        # The hourly 120-symbol scan is intentionally background work.  A slow
+        # Binance kline response must never block the two-minute pulse, live
+        # position management, or connection heartbeat.
+        if cycle_started >= next_full_scan and scan_future is None:
+            scan_started_at = _utc_now().isoformat()
+            scan_future = scan_executor.submit(
+                scan_market,
+                replace(DEFAULT_CONFIG, max_universe=top),
+            )
+            next_full_scan = cycle_started + interval_seconds
+            print("Full scan started in background", flush=True)
+
+        watchdog.beat(
+            "pulse",
+            full_scan_running=bool(scan_future and not scan_future.done()),
+            full_scan_started_at=scan_started_at,
+        )
         try:
             pulse_symbols = run_pulse(
                 data_dir,
@@ -717,6 +839,12 @@ def main() -> None:
         remaining = max(5.0, min(float(pulse_interval_seconds), until_full_scan))
         if symbols:
             output = data_dir / "order_book" / f"{_utc_now():%Y-%m-%d}.jsonl.gz"
+            watchdog.beat(
+                "order_book",
+                symbols=len(symbols),
+                deadline_seconds=remaining + 10.0,
+                full_scan_running=bool(scan_future and not scan_future.done()),
+            )
             try:
                 asyncio.run(
                     collect(
@@ -731,7 +859,12 @@ def main() -> None:
                 print(f"Order-book stream failed: {type(exc).__name__}: {exc}", flush=True)
                 time.sleep(remaining)
         else:
+            watchdog.beat("sleep", sleep_seconds=remaining)
             time.sleep(remaining)
+        watchdog.beat(
+            "cycle_complete",
+            full_scan_running=bool(scan_future and not scan_future.done()),
+        )
 
 
 if __name__ == "__main__":

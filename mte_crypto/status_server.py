@@ -23,6 +23,7 @@ def _read_json(path: Path) -> dict:
 
 def _full_status_payload(data_dir: Path) -> dict:
     payload = status_payload(data_dir)
+    payload["daemon"] = _read_json(data_dir / "daemon_heartbeat.json")
     payload["paper_portfolio"] = paper_portfolio_payload(data_dir)
     payload["futures_shadow"] = futures_shadow_payload(data_dir)
     payload["market_regime"] = _read_json(data_dir / "market_regime.json")
@@ -83,6 +84,7 @@ def render_status_html(payload: dict) -> str:
     paper = payload.get("paper_portfolio") or {}
     futures = payload.get("futures_shadow") or {}
     regime = payload.get("market_regime") or {}
+    daemon = payload.get("daemon") or {}
     live = payload.get("live_spot") or {}
     live_connection = live.get("connection") or {}
     live_futures = payload.get("live_futures") or {}
@@ -148,6 +150,7 @@ table{{border-collapse:collapse;width:100%;min-width:1250px}}th,td{{padding:10px
 <p>Paper research remains active. Real Spot and Real Futures are separately gated and default to SAFE_DISABLED. Times are UTC.</p>
 <div><span class="pill">Hunter active: {hunter_count}</span>
 <span class="pill">Pulse active: {pulse_count}</span>
+<span class="pill">Worker: {escape(str(daemon.get('status', 'UNKNOWN')))} · {escape(str(daemon.get('phase', '—')))}</span>
 <span class="pill">Regime: {escape(str(regime.get('state', 'UNKNOWN')))}</span>
 <span class="pill">Live Spot: {escape(str(live.get('mode', 'SAFE_DISABLED')))}</span>
 <span class="pill">Spot link: {'CONNECTED' if live_connection.get('connected') else 'NOT CONNECTED'}</span>
