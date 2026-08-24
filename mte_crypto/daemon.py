@@ -68,7 +68,7 @@ from .status_server import start_status_server
 UTC = timezone.utc
 CAIRO = ZoneInfo("Africa/Cairo")
 ALERT_STATE = "HUNTER_ALERT"
-HEARTBEAT_FILENAME = "daemon_heartbeat.json"
+HEARTBEAT_FILENAME = "mte_daemon_heartbeat.json"
 
 
 def _utc_now() -> datetime:
@@ -97,7 +97,9 @@ class RuntimeWatchdog:
     """Persist runtime health and force Railway to restart a stuck worker."""
 
     def __init__(self, data_dir: Path, timeout_seconds: float = 600.0):
-        self.path = data_dir / HEARTBEAT_FILENAME
+        runtime_dir = Path(os.getenv("MTE_RUNTIME_DIR", "/tmp/mte-runtime"))
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        self.path = runtime_dir / HEARTBEAT_FILENAME
         self.timeout_seconds = max(180.0, float(timeout_seconds))
         self._last_beat = time.monotonic()
         self._lock = threading.Lock()
