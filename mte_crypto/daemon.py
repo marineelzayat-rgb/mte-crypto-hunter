@@ -742,7 +742,22 @@ def main() -> None:
         while not storage_future.done():
             watchdog.beat("startup_storage_reclaim", compaction_running=True)
             time.sleep(2.0)
-        compacted_books = storage_future.result()
+        try:
+            compacted_books = storage_future.result()
+        except Exception as exc:
+            compacted_books = []
+            watchdog.beat(
+                "startup_storage_reclaim_failed",
+                last_error={
+                    "stage": "storage_reclaim",
+                    "type": type(exc).__name__,
+                    "message": str(exc)[:500],
+                },
+            )
+            print(
+                f"Startup storage reclaim failed: {type(exc).__name__}: {exc}",
+                flush=True,
+            )
     if compacted_books:
         print(f"Compacted order-book files: {compacted_books}", flush=True)
     watchdog.beat("startup_bootstrap_alerts")
