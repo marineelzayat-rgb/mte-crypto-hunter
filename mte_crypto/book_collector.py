@@ -94,6 +94,7 @@ def reclaim_order_book_storage(
     if not raw_dir.exists():
         return []
     files = sorted(raw_dir.glob("*.jsonl.gz"), key=lambda item: item.stat().st_mtime)
+    total_raw_bytes = sum(item.stat().st_size for item in files)
     compacted: list[str] = []
     summary_dir = data_dir / "order_book_summary"
     runtime_dir = Path(os.getenv("MTE_RUNTIME_DIR", "/tmp/mte-runtime"))
@@ -101,7 +102,12 @@ def reclaim_order_book_storage(
     for path in files:
         try:
             free = shutil.disk_usage(data_dir).free
-            if free >= min_free_bytes and path.stat().st_size <= max_raw_bytes:
+            raw_size = path.stat().st_size
+            if (
+                free >= min_free_bytes
+                and raw_size <= max_raw_bytes
+                and total_raw_bytes <= max_raw_bytes
+            ):
                 continue
             incoming = summarize_order_book_file(path)
             summary_path = summary_dir / f"{path.name.removesuffix('.jsonl.gz')}.json"
@@ -119,6 +125,7 @@ def reclaim_order_book_storage(
             summary_path.write_text(staged.read_text())
             staged.unlink()
             compacted.append(path.name)
+            total_raw_bytes = max(0, total_raw_bytes - raw_size)
         except (OSError, EOFError, ValueError) as exc:
             print(
                 f"Order-book compaction failed for {path.name}: {type(exc).__name__}: {exc}",
