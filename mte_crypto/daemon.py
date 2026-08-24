@@ -790,6 +790,7 @@ def main() -> None:
     scan_started_at: str | None = None
     while True:
         cycle_started = time.monotonic()
+        cycle_error: dict | None = None
         watchdog.beat(
             "cycle_start",
             full_scan_running=bool(scan_future and not scan_future.done()),
@@ -843,6 +844,11 @@ def main() -> None:
             )
         except Exception as exc:
             print(f"Pulse failed: {type(exc).__name__}: {exc}", flush=True)
+            cycle_error = {
+                "stage": "pulse",
+                "type": type(exc).__name__,
+                "message": str(exc)[:500],
+            }
             pulse_symbols = []
 
         symbols, book_intervals = build_order_book_collection_plan(
@@ -863,6 +869,7 @@ def main() -> None:
                 symbols=len(symbols),
                 deadline_seconds=remaining + 10.0,
                 full_scan_running=bool(scan_future and not scan_future.done()),
+                last_error=cycle_error,
             )
             try:
                 asyncio.run(
@@ -878,11 +885,16 @@ def main() -> None:
                 print(f"Order-book stream failed: {type(exc).__name__}: {exc}", flush=True)
                 time.sleep(remaining)
         else:
-            watchdog.beat("sleep", sleep_seconds=remaining)
+            watchdog.beat(
+                "sleep",
+                sleep_seconds=remaining,
+                last_error=cycle_error,
+            )
             time.sleep(remaining)
         watchdog.beat(
             "cycle_complete",
             full_scan_running=bool(scan_future and not scan_future.done()),
+            last_error=cycle_error,
         )
 
 
