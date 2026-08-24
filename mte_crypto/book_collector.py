@@ -52,29 +52,34 @@ def summarize_order_book_file(path: Path) -> dict:
     """Reduce raw snapshots to mergeable per-symbol distribution statistics."""
     summary: dict = {"version": 1, "source": path.name, "symbols": {}}
     opener = gzip.open if path.suffix == ".gz" else open
-    with opener(path, "rt", encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, start=1):
-            try:
-                record = json.loads(line)
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                continue
-            symbol = str(record.get("symbol") or "")
-            if not symbol:
-                continue
-            bucket = summary["symbols"].setdefault(symbol, {"samples": 0, "metrics": {}})
-            bucket["samples"] += 1
-            for name, raw in record.items():
-                if name in {"symbol", "received_time_ns", "last_update_id"}:
+    try:
+        with opener(path, "rt", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                try:
+                    record = json.loads(line)
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     continue
-                if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                symbol = str(record.get("symbol") or "")
+                if not symbol:
                     continue
-                value = float(raw)
-                if math.isfinite(value):
-                    _merge_metric(bucket["metrics"].setdefault(name, {}), value)
-            if line_number % 1000 == 0:
-                # Let the status-server thread answer Railway health requests
-                # while a large gzip is being compacted.
-                time.sleep(0.001)
+                bucket = summary["symbols"].setdefault(symbol, {"samples": 0, "metrics": {}})
+                bucket["samples"] += 1
+                for name, raw in record.items():
+                    if name in {"symbol", "received_time_ns", "last_update_id"}:
+                        continue
+                    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                        continue
+                    value = float(raw)
+                    if math.isfinite(value):
+                        _merge_metric(bucket["metrics"].setdefault(name, {}), value)
+                if line_number % 1000 == 0:
+                    # Let the status-server thread answer Railway health requests
+                    # while a large gzip is being compacted.
+                    time.sleep(0.001)
+    except (EOFError, gzip.BadGzipFile):
+        # Disk exhaustion can truncate the final gzip member.  Keep every
+        # complete snapshot decoded before the damaged tail.
+        summary["truncated_source"] = True
     return summary
 
 
@@ -114,7 +119,7 @@ def reclaim_order_book_storage(
             summary_path.write_text(staged.read_text())
             staged.unlink()
             compacted.append(path.name)
-        except OSError as exc:
+        except (OSError, EOFError, ValueError) as exc:
             print(
                 f"Order-book compaction failed for {path.name}: {type(exc).__name__}: {exc}",
                 flush=True,
