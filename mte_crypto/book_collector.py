@@ -17,7 +17,7 @@ from .flow import order_book_features
 
 
 ORDER_BOOK_MIN_FREE_BYTES = 128 * 1024 * 1024
-ORDER_BOOK_MAX_RAW_BYTES = 64 * 1024 * 1024
+ORDER_BOOK_MAX_RAW_BYTES = 8 * 1024 * 1024
 
 
 def _merge_metric(target: dict, value: float) -> None:
