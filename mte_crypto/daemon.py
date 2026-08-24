@@ -20,7 +20,7 @@ from .binance import (
     spot_usdt_tickers,
     usd_m_futures_snapshots,
 )
-from .book_collector import collect
+from .book_collector import collect, reclaim_order_book_storage
 from .config import DEFAULT_CONFIG
 from .features import wilder_atr
 from .futures_shadow import (
@@ -735,8 +735,12 @@ def main() -> None:
         data_dir,
         timeout_seconds=float(os.getenv("MTE_WATCHDOG_TIMEOUT_SECONDS", "600")),
     )
-    watchdog.beat("startup_bootstrap_alerts")
     watchdog.start()
+    watchdog.beat("startup_storage_reclaim")
+    compacted_books = reclaim_order_book_storage(data_dir)
+    if compacted_books:
+        print(f"Compacted order-book files: {compacted_books}", flush=True)
+    watchdog.beat("startup_bootstrap_alerts")
     bootstrap_active_alerts(data_dir)
     watchdog.beat("startup_paper_portfolio")
     ensure_paper_portfolio(data_dir)
@@ -896,6 +900,9 @@ def main() -> None:
             full_scan_running=bool(scan_future and not scan_future.done()),
             last_error=cycle_error,
         )
+        compacted_books = reclaim_order_book_storage(data_dir)
+        if compacted_books:
+            print(f"Compacted order-book files: {compacted_books}", flush=True)
 
 
 if __name__ == "__main__":
