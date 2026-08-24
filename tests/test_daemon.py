@@ -1,9 +1,14 @@
 from datetime import datetime, timezone
 from pathlib import Path
+import gzip
+import json
 import tempfile
 import unittest
 
-from mte_crypto.book_collector import collection_timeout_seconds
+from mte_crypto.book_collector import (
+    collection_timeout_seconds,
+    reclaim_order_book_storage,
+)
 from mte_crypto.daemon import (
     build_order_book_collection_plan,
     update_active_candidates,
@@ -13,6 +18,28 @@ from mte_crypto.paper_portfolio import open_paper_position
 
 
 class ActiveCandidateTests(unittest.TestCase):
+    def test_order_book_storage_is_compacted_to_mergeable_statistics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            raw = data_dir / "order_book" / "2026-08-20.jsonl.gz"
+            raw.parent.mkdir(parents=True)
+            with gzip.open(raw, "wt", encoding="utf-8") as handle:
+                handle.write(json.dumps({"symbol": "TESTUSDT", "book_spread_bps": 2.0}) + "\n")
+                handle.write(json.dumps({"symbol": "TESTUSDT", "book_spread_bps": 4.0}) + "\n")
+            compacted = reclaim_order_book_storage(
+                data_dir, min_free_bytes=10**18, max_raw_bytes=0
+            )
+            self.assertEqual(compacted, [raw.name])
+            self.assertFalse(raw.exists())
+            summary = json.loads(
+                (data_dir / "order_book_summary" / "2026-08-20.json").read_text()
+            )
+            metric = summary["symbols"]["TESTUSDT"]["metrics"]["book_spread_bps"]
+            self.assertEqual(metric["count"], 2)
+            self.assertEqual(metric["min"], 2.0)
+            self.assertEqual(metric["max"], 4.0)
+            self.assertEqual(metric["sum"], 6.0)
+
     def test_watchdog_detects_only_expired_heartbeat(self):
         self.assertFalse(watchdog_is_stale(100.0, 699.0, 600.0))
         self.assertTrue(watchdog_is_stale(100.0, 701.0, 600.0))
