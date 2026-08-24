@@ -3,6 +3,7 @@ from __future__ import annotations
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import threading
 from urllib.parse import urlparse
@@ -23,7 +24,8 @@ def _read_json(path: Path) -> dict:
 
 def _full_status_payload(data_dir: Path) -> dict:
     payload = status_payload(data_dir)
-    payload["daemon"] = _read_json(data_dir / "daemon_heartbeat.json")
+    runtime_dir = Path(os.getenv("MTE_RUNTIME_DIR", "/tmp/mte-runtime"))
+    payload["daemon"] = _read_json(runtime_dir / "mte_daemon_heartbeat.json")
     payload["paper_portfolio"] = paper_portfolio_payload(data_dir)
     payload["futures_shadow"] = futures_shadow_payload(data_dir)
     payload["market_regime"] = _read_json(data_dir / "market_regime.json")
