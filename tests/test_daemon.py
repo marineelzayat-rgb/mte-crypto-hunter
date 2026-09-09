@@ -8,6 +8,7 @@ import unittest
 from mte_crypto.book_collector import (
     collection_timeout_seconds,
     reclaim_order_book_storage,
+    reclaim_scan_storage,
 )
 from mte_crypto.daemon import (
     build_order_book_collection_plan,
@@ -18,6 +19,36 @@ from mte_crypto.paper_portfolio import open_paper_position
 
 
 class ActiveCandidateTests(unittest.TestCase):
+    def test_timestamped_scan_retention_preserves_latest_scan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            (data_dir / "latest_scan.csv").write_text("current")
+            for index in range(5):
+                path = data_dir / f"scan_20260820_00000{index}.csv"
+                path.write_text("x" * 10)
+                path.touch()
+            removed = reclaim_scan_storage(
+                data_dir,
+                max_files=2,
+                max_raw_bytes=100,
+            )
+            self.assertEqual(len(removed), 3)
+            self.assertEqual(len(list(data_dir.glob("scan_*.csv"))), 2)
+            self.assertEqual((data_dir / "latest_scan.csv").read_text(), "current")
+
+    def test_timestamped_scan_retention_obeys_byte_cap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            for index in range(3):
+                (data_dir / f"scan_20260820_00000{index}.csv").write_text("x" * 10)
+            removed = reclaim_scan_storage(
+                data_dir,
+                max_files=10,
+                max_raw_bytes=15,
+            )
+            self.assertEqual(len(removed), 2)
+            self.assertEqual(len(list(data_dir.glob("scan_*.csv"))), 1)
+
     def test_order_book_storage_is_compacted_to_mergeable_statistics(self):
         with tempfile.TemporaryDirectory() as directory:
             data_dir = Path(directory)

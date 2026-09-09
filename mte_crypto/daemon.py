@@ -20,7 +20,11 @@ from .binance import (
     spot_usdt_tickers,
     usd_m_futures_snapshots,
 )
-from .book_collector import collect, reclaim_order_book_storage
+from .book_collector import (
+    collect,
+    reclaim_order_book_storage,
+    reclaim_scan_storage,
+)
 from .config import DEFAULT_CONFIG
 from .features import wilder_atr
 from .futures_shadow import (
@@ -737,6 +741,9 @@ def main() -> None:
     )
     watchdog.start()
     watchdog.beat("startup_storage_reclaim")
+    removed_scans = reclaim_scan_storage(data_dir)
+    if removed_scans:
+        print(f"Pruned timestamped scan files: {len(removed_scans)}", flush=True)
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="mte-storage") as storage_executor:
         storage_future = storage_executor.submit(reclaim_order_book_storage, data_dir)
         while not storage_future.done():
@@ -923,6 +930,9 @@ def main() -> None:
         compacted_books = reclaim_order_book_storage(data_dir)
         if compacted_books:
             print(f"Compacted order-book files: {compacted_books}", flush=True)
+        removed_scans = reclaim_scan_storage(data_dir)
+        if removed_scans:
+            print(f"Pruned timestamped scan files: {len(removed_scans)}", flush=True)
 
 
 if __name__ == "__main__":
