@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import shutil
 import time
+import zlib
 
 import websockets
 
@@ -18,6 +19,8 @@ from .flow import order_book_features
 
 ORDER_BOOK_MIN_FREE_BYTES = 128 * 1024 * 1024
 ORDER_BOOK_MAX_RAW_BYTES = 8 * 1024 * 1024
+SCAN_MAX_FILES = 72
+SCAN_MAX_RAW_BYTES = 8 * 1024 * 1024
 
 
 def _merge_metric(target: dict, value: float) -> None:
@@ -76,7 +79,7 @@ def summarize_order_book_file(path: Path) -> dict:
                     # Let the status-server thread answer Railway health requests
                     # while a large gzip is being compacted.
                     time.sleep(0.001)
-    except (EOFError, gzip.BadGzipFile):
+    except (EOFError, gzip.BadGzipFile, zlib.error):
         # Disk exhaustion can truncate the final gzip member.  Keep every
         # complete snapshot decoded before the damaged tail.
         summary["truncated_source"] = True
@@ -133,6 +136,52 @@ def reclaim_order_book_storage(
             )
             break
     return compacted
+
+
+def reclaim_scan_storage(
+    data_dir: Path,
+    *,
+    max_files: int = SCAN_MAX_FILES,
+    max_raw_bytes: int = SCAN_MAX_RAW_BYTES,
+) -> list[str]:
+    """Keep a bounded rolling window of timestamped market scans.
+
+    ``latest_scan.csv`` is deliberately excluded: it is overwritten in place
+    and is used by the status/research workflow.  Only redundant timestamped
+    snapshots are pruned.
+    """
+    max_files = max(0, int(max_files))
+    max_raw_bytes = max(0, int(max_raw_bytes))
+    try:
+        files = sorted(
+            data_dir.glob("scan_*.csv"),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError as exc:
+        print(
+            f"Scan retention inventory failed: {type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return []
+
+    kept_bytes = 0
+    removed: list[str] = []
+    for index, path in enumerate(files):
+        try:
+            size = path.stat().st_size
+            keep = index < max_files and kept_bytes + size <= max_raw_bytes
+            if keep:
+                kept_bytes += size
+                continue
+            path.unlink()
+            removed.append(path.name)
+        except OSError as exc:
+            print(
+                f"Scan retention failed for {path.name}: {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+    return removed
 
 
 def collection_timeout_seconds(duration_seconds: float | None) -> float | None:
